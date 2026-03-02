@@ -34,6 +34,30 @@ func TestStream_Response_ReconstructsToolInputFromInputJSONDelta(t *testing.T) {
 	}
 }
 
+func TestStream_Response_CompactsSparseContentIndices(t *testing.T) {
+	stream := newStreamFromEventStream(&scriptedEventStream{
+		events: toolUseEventsForStreamTestAtIndex([]string{`{"a":6,`, `"b":7}`}, true, 1),
+	})
+
+	for range stream.Events() {
+	}
+
+	resp := stream.Response()
+	if resp == nil {
+		t.Fatal("expected response")
+	}
+	if got := len(resp.Content); got != 1 {
+		t.Fatalf("len(response content) = %d, want 1", got)
+	}
+	uses := resp.ToolUses()
+	if len(uses) != 1 {
+		t.Fatalf("len(tool uses) = %d, want 1", len(uses))
+	}
+	if got := uses[0].Name; got != "multiply" {
+		t.Fatalf("tool name = %q, want %q", got, "multiply")
+	}
+}
+
 func TestStream_Response_ReconstructsToolInputWithoutContentBlockStop(t *testing.T) {
 	stream := newStreamFromEventStream(&scriptedEventStream{
 		events: toolUseEventsForStreamTest([]string{`{"a":6,`, `"b":7}`}, false),
@@ -166,6 +190,10 @@ func (s *terminalEOFEventStream) Close() error {
 }
 
 func toolUseEventsForStreamTest(inputParts []string, includeBlockStop bool) []types.StreamEvent {
+	return toolUseEventsForStreamTestAtIndex(inputParts, includeBlockStop, 0)
+}
+
+func toolUseEventsForStreamTestAtIndex(inputParts []string, includeBlockStop bool, index int) []types.StreamEvent {
 	events := []types.StreamEvent{
 		types.MessageStartEvent{
 			Type: "message_start",
@@ -177,7 +205,7 @@ func toolUseEventsForStreamTest(inputParts []string, includeBlockStop bool) []ty
 		},
 		types.ContentBlockStartEvent{
 			Type:  "content_block_start",
-			Index: 0,
+			Index: index,
 			ContentBlock: types.ToolUseBlock{
 				Type:  "tool_use",
 				ID:    "call_1",
@@ -190,7 +218,7 @@ func toolUseEventsForStreamTest(inputParts []string, includeBlockStop bool) []ty
 	for _, part := range inputParts {
 		events = append(events, types.ContentBlockDeltaEvent{
 			Type:  "content_block_delta",
-			Index: 0,
+			Index: index,
 			Delta: types.InputJSONDelta{
 				Type:        "input_json_delta",
 				PartialJSON: part,
@@ -201,7 +229,7 @@ func toolUseEventsForStreamTest(inputParts []string, includeBlockStop bool) []ty
 	if includeBlockStop {
 		events = append(events, types.ContentBlockStopEvent{
 			Type:  "content_block_stop",
-			Index: 0,
+			Index: index,
 		})
 	}
 

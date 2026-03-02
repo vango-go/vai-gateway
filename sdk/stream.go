@@ -284,7 +284,7 @@ streamLoop:
 		applyToolInput(index)
 	}
 
-	response.Content = currentContent
+	response.Content = compactContentBlocks(currentContent)
 	if s.userTranscript != "" {
 		if response.Metadata == nil {
 			response.Metadata = make(map[string]any)
@@ -326,6 +326,24 @@ func applyDelta(block types.ContentBlock, delta types.Delta) types.ContentBlock 
 		}
 	}
 	return block
+}
+
+// compactContentBlocks removes nil holes caused by sparse stream indices.
+// Providers can emit non-zero content block indices (e.g., tool block at index 1
+// before any text delta at index 0). Persisting those holes into response content
+// produces invalid request history when reused in follow-up turns.
+func compactContentBlocks(blocks []types.ContentBlock) []types.ContentBlock {
+	if len(blocks) == 0 {
+		return nil
+	}
+	out := make([]types.ContentBlock, 0, len(blocks))
+	for _, block := range blocks {
+		if block == nil {
+			continue
+		}
+		out = append(out, block)
+	}
+	return out
 }
 
 // Events returns the channel of stream events.

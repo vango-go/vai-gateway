@@ -14,6 +14,7 @@ import (
 
 	"github.com/vango-go/vai-lite/internal/dotenv"
 	"github.com/vango-go/vai-lite/pkg/core"
+	"github.com/vango-go/vai-lite/pkg/core/types"
 	vai "github.com/vango-go/vai-lite/sdk"
 	"github.com/vango-go/vai-lite/sdk/adapters/tavily"
 )
@@ -26,14 +27,19 @@ const (
 )
 
 type chatConfig struct {
-	BaseURL           string
-	Model             string
-	MaxTokens         int
-	Timeout           time.Duration
-	SystemPrompt      string
-	GatewayAPIKey     string
-	TavilyAPIKey      string
-	ProviderKeys      map[string]string
+	BaseURL       string
+	Model         string
+	MaxTokens     int
+	Timeout       time.Duration
+	SystemPrompt  string
+	GatewayAPIKey string
+	TavilyAPIKey  string
+	ProviderKeys  map[string]string
+}
+
+type streamPrintState struct {
+	sawText bool
+	text    strings.Builder
 }
 
 func parseChatConfig(args []string, getenv func(string) string) (chatConfig, error) {
@@ -59,10 +65,11 @@ func parseChatConfig(args []string, getenv func(string) string) (chatConfig, err
 	cfg.TavilyAPIKey = strings.TrimSpace(getenv("TAVILY_API_KEY"))
 	cfg.ProviderKeys = collectProviderKeys(getenv)
 
-	if err := validateChatConfig(cfg); err != nil {
+	canonicalCfg, err := canonicalizeAndValidateChatConfig(cfg)
+	if err != nil {
 		return chatConfig{}, err
 	}
-	return cfg, nil
+	return canonicalCfg, nil
 }
 
 func collectProviderKeys(getenv func(string) string) map[string]string {
@@ -158,35 +165,59 @@ func validateModelWithKeys(model string, keys map[string]string) (string, error)
 }
 
 func validateChatConfig(cfg chatConfig) error {
+	_, err := canonicalizeAndValidateChatConfig(cfg)
+	return err
+}
+
+func canonicalizeAndValidateChatConfig(cfg chatConfig) (chatConfig, error) {
 	cfg.BaseURL = strings.TrimSpace(cfg.BaseURL)
 	cfg.Model = strings.TrimSpace(cfg.Model)
+	cfg.SystemPrompt = strings.TrimSpace(cfg.SystemPrompt)
 	cfg.GatewayAPIKey = strings.TrimSpace(cfg.GatewayAPIKey)
+	cfg.TavilyAPIKey = strings.TrimSpace(cfg.TavilyAPIKey)
+	cfg.ProviderKeys = canonicalizeProviderKeys(cfg.ProviderKeys)
 
 	if cfg.BaseURL == "" {
-		return errors.New("base-url must not be empty")
+		return chatConfig{}, errors.New("base-url must not be empty")
 	}
 	baseURL, err := url.Parse(cfg.BaseURL)
 	if err != nil || strings.TrimSpace(baseURL.Scheme) == "" || strings.TrimSpace(baseURL.Host) == "" {
-		return errors.New("base-url must be a valid absolute URL")
+		return chatConfig{}, errors.New("base-url must be a valid absolute URL")
 	}
 	if baseURL.User != nil {
-		return errors.New("base-url must not include credentials")
+		return chatConfig{}, errors.New("base-url must not include credentials")
 	}
 	canonicalModel, err := validateModelWithKeys(cfg.Model, cfg.ProviderKeys)
 	if err != nil {
-		return err
+		return chatConfig{}, err
 	}
 	cfg.Model = canonicalModel
 	if cfg.MaxTokens <= 0 {
-		return errors.New("max-tokens must be > 0")
+		return chatConfig{}, errors.New("max-tokens must be > 0")
 	}
 	if cfg.Timeout <= 0 {
-		return errors.New("timeout must be > 0")
+		return chatConfig{}, errors.New("timeout must be > 0")
 	}
-	if strings.TrimSpace(cfg.TavilyAPIKey) == "" {
-		return errors.New("TAVILY_API_KEY is required to enable vai_web_search and vai_web_fetch")
+	if cfg.TavilyAPIKey == "" {
+		return chatConfig{}, errors.New("TAVILY_API_KEY is required to enable vai_web_search and vai_web_fetch")
 	}
-	return nil
+	return cfg, nil
+}
+
+func canonicalizeProviderKeys(keys map[string]string) map[string]string {
+	if len(keys) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(keys))
+	for k, v := range keys {
+		key := strings.ToLower(strings.TrimSpace(k))
+		val := strings.TrimSpace(v)
+		if key == "" || val == "" {
+			continue
+		}
+		out[key] = val
+	}
+	return out
 }
 
 func buildClientOptions(cfg chatConfig) []vai.ClientOption {
@@ -250,9 +281,12 @@ func handleSlashCommand(line string, state *chatRuntime, cfg chatConfig, out io.
 }
 
 func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer, errOut io.Writer) error {
-	if err := validateChatConfig(cfg); err != nil {
+	canonicalCfg, err := canonicalizeAndValidateChatConfig(cfg)
+	if err != nil {
 		return err
 	}
+	cfg = canonicalCfg
+
 	if in == nil {
 		in = os.Stdin
 	}
@@ -261,14 +295,6 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 	}
 	if errOut == nil {
 		errOut = os.Stderr
-	}
-
-	provider, _, _, modelErr := parseModelRef(cfg.Model)
-	if modelErr != nil {
-		return modelErr
-	}
-	if envHint, ok := requiredKeySpec(provider); ok && !hasKeyForProvider(provider, cfg.ProviderKeys) {
-		return fmt.Errorf("missing provider key for %s (set %s)", provider, envHint)
 	}
 
 	client := vai.NewClient(buildClientOptions(cfg)...)
@@ -283,6 +309,7 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 		currentModel: cfg.Model,
 		history:      make([]vai.Message, 0, 32),
 	}
+
 	for {
 		fmt.Fprint(out, "> ")
 		if !scanner.Scan() {
@@ -317,7 +344,7 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 
 		req := &vai.MessageRequest{
 			Model:     state.currentModel,
-			Messages:  state.history,
+			Messages:  sanitizeMessagesForRequest(state.history),
 			MaxTokens: cfg.MaxTokens,
 		}
 		if cfg.SystemPrompt != "" {
@@ -333,45 +360,196 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 			continue
 		}
 
-		sawDelta := false
-		var streamedText strings.Builder
-		for event := range stream.Events() {
-			if text, ok := vai.TextDeltaFrom(event); ok {
-				sawDelta = true
-				fmt.Fprint(out, text)
-				streamedText.WriteString(text)
-			}
-			if toolCall, ok := event.(vai.ToolCallStartEvent); ok {
-				fmt.Fprintf(out, "\n[tool] %s\n", toolCall.Name)
-			}
-		}
+		printState := streamPrintState{}
+		processText, processErr := stream.Process(buildStreamCallbacks(out, &printState))
 		_ = stream.Close()
 
-		if err := stream.Err(); err != nil {
+		if processErr != nil {
 			cancel()
 			state.history = state.history[:beforeLen]
 			fmt.Fprintln(out)
-			fmt.Fprintf(errOut, "run stream error: %v\n", err)
+			fmt.Fprintf(errOut, "run stream error: %v\n", processErr)
 			continue
 		}
 
 		result := stream.Result()
-		assistantText := strings.TrimSpace(streamedText.String())
-		if !sawDelta && result != nil && result.Response != nil {
-			assistantText = strings.TrimSpace(result.Response.TextContent())
-		}
-		if assistantText != "" && !sawDelta {
+		assistantText, shouldPrintFallback := resolveAssistantDisplay(printState.sawText, printState.text.String(), processText, result)
+		if shouldPrintFallback {
 			fmt.Fprint(out, assistantText)
 		}
 		fmt.Fprintln(out)
 		cancel()
-		if assistantText != "" {
-			state.history = append(state.history, vai.Message{
-				Role:    "assistant",
-				Content: vai.Text(assistantText),
-			})
+
+		syncHistoryFromRunResult(&state, result, assistantText)
+	}
+}
+
+func buildStreamCallbacks(out io.Writer, printState *streamPrintState) vai.StreamCallbacks {
+	if out == nil {
+		out = os.Stdout
+	}
+	if printState == nil {
+		printState = &streamPrintState{}
+	}
+	return vai.StreamCallbacks{
+		OnTextDelta: func(text string) {
+			printState.sawText = true
+			printState.text.WriteString(text)
+			fmt.Fprint(out, text)
+		},
+		OnToolUseStart: func(index int, id, name string) {
+			fmt.Fprintf(out, "\n[tool-stream:start] idx=%d name=%s id=%s\n", index, dashIfEmpty(name), dashIfEmpty(id))
+		},
+		OnToolInputDelta: func(index int, id, name, partialJSON string) {
+			fmt.Fprintf(out, "\n[tool-stream:delta] idx=%d name=%s id=%s %s\n", index, dashIfEmpty(name), dashIfEmpty(id), sanitizeToolDeltaForLine(partialJSON))
+		},
+		OnToolUseStop: func(index int, id, name string) {
+			fmt.Fprintf(out, "\n[tool-stream:stop] idx=%d name=%s id=%s\n", index, dashIfEmpty(name), dashIfEmpty(id))
+		},
+		OnToolCallStart: func(id, name string, _ map[string]any) {
+			fmt.Fprintf(out, "\n[tool] %s\n", name)
+		},
+	}
+}
+
+func resolveAssistantDisplay(sawText bool, streamedText string, processText string, result *vai.RunResult) (string, bool) {
+	if sawText {
+		return strings.TrimSpace(streamedText), false
+	}
+	text := ""
+	if result != nil && result.Response != nil {
+		text = strings.TrimSpace(result.Response.TextContent())
+	}
+	if text == "" {
+		text = strings.TrimSpace(processText)
+	}
+	return text, text != ""
+}
+
+func syncHistoryFromRunResult(state *chatRuntime, result *vai.RunResult, assistantText string) {
+	if state == nil {
+		return
+	}
+	if result != nil && len(result.Messages) > 0 {
+		state.history = sanitizeMessagesForRequest(result.Messages)
+		return
+	}
+	if result != nil && result.Response != nil && len(result.Response.Content) > 0 {
+		contentCopy := sanitizeContentBlocksForInput(result.Response.Content)
+		state.history = append(state.history, vai.Message{
+			Role:    "assistant",
+			Content: contentCopy,
+		})
+		return
+	}
+	if strings.TrimSpace(assistantText) != "" {
+		state.history = append(state.history, vai.Message{
+			Role:    "assistant",
+			Content: vai.Text(strings.TrimSpace(assistantText)),
+		})
+	}
+}
+
+func dashIfEmpty(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "-"
+	}
+	return strings.TrimSpace(v)
+}
+
+func sanitizeToolDeltaForLine(partialJSON string) string {
+	out := strings.ReplaceAll(partialJSON, "\r", `\r`)
+	return strings.ReplaceAll(out, "\n", `\n`)
+}
+
+func sanitizeMessagesForRequest(messages []vai.Message) []vai.Message {
+	if len(messages) == 0 {
+		return nil
+	}
+	out := make([]vai.Message, 0, len(messages))
+	for _, msg := range messages {
+		switch content := msg.Content.(type) {
+		case string:
+			out = append(out, vai.Message{Role: msg.Role, Content: content})
+		default:
+			blocks := sanitizeContentBlocksForInput(msg.ContentBlocks())
+			out = append(out, vai.Message{Role: msg.Role, Content: blocks})
 		}
 	}
+	return out
+}
+
+func sanitizeContentBlocksForInput(blocks []vai.ContentBlock) []vai.ContentBlock {
+	if len(blocks) == 0 {
+		return nil
+	}
+	out := make([]vai.ContentBlock, 0, len(blocks))
+	for _, block := range blocks {
+		if block == nil {
+			continue
+		}
+		switch b := block.(type) {
+		case types.TextBlock:
+			if strings.TrimSpace(b.Type) == "" {
+				b.Type = "text"
+			}
+			out = append(out, b)
+		case types.ImageBlock:
+			if strings.TrimSpace(b.Type) == "" {
+				b.Type = "image"
+			}
+			out = append(out, b)
+		case types.AudioBlock:
+			if strings.TrimSpace(b.Type) == "" {
+				b.Type = "audio"
+			}
+			out = append(out, b)
+		case types.VideoBlock:
+			if strings.TrimSpace(b.Type) == "" {
+				b.Type = "video"
+			}
+			out = append(out, b)
+		case types.DocumentBlock:
+			if strings.TrimSpace(b.Type) == "" {
+				b.Type = "document"
+			}
+			out = append(out, b)
+		case types.ToolUseBlock:
+			if strings.TrimSpace(b.Type) == "" {
+				b.Type = "tool_use"
+			}
+			out = append(out, b)
+		case types.ThinkingBlock:
+			if strings.TrimSpace(b.Type) == "" {
+				b.Type = "thinking"
+			}
+			out = append(out, b)
+		case types.ServerToolUseBlock:
+			if strings.TrimSpace(b.Type) == "" {
+				b.Type = "server_tool_use"
+			}
+			out = append(out, b)
+		case types.WebSearchToolResultBlock:
+			if strings.TrimSpace(b.Type) == "" {
+				b.Type = "web_search_tool_result"
+			}
+			out = append(out, b)
+		case types.ToolResultBlock:
+			if strings.TrimSpace(b.Type) == "" {
+				b.Type = "tool_result"
+			}
+			b.Content = sanitizeContentBlocksForInput(b.Content)
+			out = append(out, b)
+		case types.UnknownContentBlock:
+			if strings.TrimSpace(b.Type) == "" {
+				continue
+			}
+			out = append(out, b)
+		default:
+			out = append(out, block)
+		}
+	}
+	return out
 }
 
 func main() {

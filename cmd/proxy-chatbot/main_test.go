@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/vango-go/vai-lite/pkg/core/types"
 	vai "github.com/vango-go/vai-lite/sdk"
 )
 
@@ -400,5 +402,258 @@ func TestHandleSlashCommand_ModelSwitchPreservesHistory(t *testing.T) {
 	}
 	if len(state.history) != beforeLen {
 		t.Fatalf("history length changed: got %d want %d", len(state.history), beforeLen)
+	}
+}
+
+func TestParseChatConfig_CanonicalizesModelAndSystemPrompt(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseChatConfig([]string{"--model", " OpenAI/gpt-5-mini ", "--system", "  be concise  "}, envMap(map[string]string{
+		"OPENAI_API_KEY": "sk-openai-test",
+		"TAVILY_API_KEY": "tvly-test",
+	}))
+	if err != nil {
+		t.Fatalf("parseChatConfig error: %v", err)
+	}
+	if cfg.Model != "openai/gpt-5-mini" {
+		t.Fatalf("Model=%q, want %q", cfg.Model, "openai/gpt-5-mini")
+	}
+	if cfg.SystemPrompt != "be concise" {
+		t.Fatalf("SystemPrompt=%q, want %q", cfg.SystemPrompt, "be concise")
+	}
+}
+
+func TestRunChatbot_CanonicalizesConfigForRuntimeState(t *testing.T) {
+	t.Parallel()
+
+	cfg := chatConfig{
+		BaseURL:      "http://127.0.0.1:8080",
+		Model:        " OpenAI/gpt-5-mini ",
+		MaxTokens:    128,
+		Timeout:      2 * time.Second,
+		TavilyAPIKey: "tvly-test",
+		ProviderKeys: map[string]string{
+			"openai": "sk-openai-test",
+		},
+	}
+
+	var out bytes.Buffer
+	err := runChatbot(context.Background(), cfg, strings.NewReader(""), &out, io.Discard)
+	if err != nil {
+		t.Fatalf("runChatbot error: %v", err)
+	}
+	if !strings.Contains(out.String(), "using openai/gpt-5-mini") {
+		t.Fatalf("banner missing canonical model, output=%q", out.String())
+	}
+}
+
+func TestBuildStreamCallbacks_PrintsToolStreamLinesAndText(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	state := &streamPrintState{}
+	callbacks := buildStreamCallbacks(&out, state)
+
+	callbacks.OnToolUseStart(2, "", "")
+	callbacks.OnToolInputDelta(2, "", "", "{\n\"a\":1}")
+	callbacks.OnToolUseStop(2, "", "")
+	callbacks.OnToolCallStart("call_1", "vai_web_search", nil)
+	callbacks.OnTextDelta("hello")
+
+	got := out.String()
+	if !strings.Contains(got, "[tool-stream:start] idx=2 name=- id=-") {
+		t.Fatalf("missing tool-stream start line, got=%q", got)
+	}
+	if !strings.Contains(got, "[tool-stream:delta] idx=2 name=- id=- {\\n\"a\":1}") {
+		t.Fatalf("missing/sanitized tool-stream delta line, got=%q", got)
+	}
+	if !strings.Contains(got, "[tool-stream:stop] idx=2 name=- id=-") {
+		t.Fatalf("missing tool-stream stop line, got=%q", got)
+	}
+	if !strings.Contains(got, "[tool] vai_web_search") {
+		t.Fatalf("missing execution tool line, got=%q", got)
+	}
+	if !strings.Contains(got, "hello") {
+		t.Fatalf("missing streamed text, got=%q", got)
+	}
+	if !state.sawText {
+		t.Fatal("state.sawText=false, want true")
+	}
+	if state.text.String() != "hello" {
+		t.Fatalf("state.text=%q, want %q", state.text.String(), "hello")
+	}
+}
+
+func TestResolveAssistantDisplay_NoDuplicateWhenTextStreamed(t *testing.T) {
+	t.Parallel()
+
+	result := &vai.RunResult{
+		Response: &vai.Response{
+			MessageResponse: &types.MessageResponse{
+				Type:    "message",
+				Role:    "assistant",
+				Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "fallback"}},
+			},
+		},
+	}
+
+	text, shouldPrint := resolveAssistantDisplay(true, "streamed", "process", result)
+	if text != "streamed" {
+		t.Fatalf("text=%q, want %q", text, "streamed")
+	}
+	if shouldPrint {
+		t.Fatal("shouldPrint=true, want false")
+	}
+}
+
+func TestResolveAssistantDisplay_FallbackFromResultThenProcess(t *testing.T) {
+	t.Parallel()
+
+	result := &vai.RunResult{
+		Response: &vai.Response{
+			MessageResponse: &types.MessageResponse{
+				Type:    "message",
+				Role:    "assistant",
+				Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "from result"}},
+			},
+		},
+	}
+	text, shouldPrint := resolveAssistantDisplay(false, "", "from process", result)
+	if text != "from result" || !shouldPrint {
+		t.Fatalf("got (text=%q, shouldPrint=%v), want (%q,true)", text, shouldPrint, "from result")
+	}
+
+	text, shouldPrint = resolveAssistantDisplay(false, "", "from process", nil)
+	if text != "from process" || !shouldPrint {
+		t.Fatalf("got (text=%q, shouldPrint=%v), want (%q,true)", text, shouldPrint, "from process")
+	}
+}
+
+func TestSyncHistoryFromRunResult_UsesResultMessages(t *testing.T) {
+	t.Parallel()
+
+	state := &chatRuntime{
+		history: []vai.Message{
+			{Role: "user", Content: vai.Text("old")},
+		},
+	}
+	result := &vai.RunResult{
+		Messages: []types.Message{
+			{Role: "user", Content: []types.ContentBlock{
+				nil,
+				types.TextBlock{Text: "new-user"},
+			}},
+			{Role: "assistant", Content: vai.Text("new-assistant")},
+		},
+	}
+
+	syncHistoryFromRunResult(state, result, "ignored")
+
+	if len(state.history) != 2 {
+		t.Fatalf("history len=%d, want 2", len(state.history))
+	}
+	if state.history[0].TextContent() != "new-user" || state.history[1].TextContent() != "new-assistant" {
+		t.Fatalf("history content unexpected: %#v", state.history)
+	}
+	firstBlocks := state.history[0].ContentBlocks()
+	if len(firstBlocks) != 1 {
+		t.Fatalf("sanitized first message blocks len=%d, want 1", len(firstBlocks))
+	}
+	if tb, ok := firstBlocks[0].(types.TextBlock); !ok || tb.Type != "text" || tb.Text != "new-user" {
+		t.Fatalf("sanitized first block=%#v, want TextBlock{Type:text,Text:new-user}", firstBlocks[0])
+	}
+
+	result.Messages[0] = types.Message{Role: "assistant", Content: vai.Text("mutated")}
+	if state.history[0].TextContent() != "new-user" {
+		t.Fatalf("history aliasing detected, got=%q", state.history[0].TextContent())
+	}
+}
+
+func TestSanitizeContentBlocksForInput_DropsUnknownEmptyTypeAndNil(t *testing.T) {
+	t.Parallel()
+
+	blocks := sanitizeContentBlocksForInput([]vai.ContentBlock{
+		nil,
+		types.UnknownContentBlock{Type: ""},
+		types.TextBlock{Type: "", Text: "ok"},
+	})
+	if len(blocks) != 1 {
+		t.Fatalf("len(blocks)=%d, want 1", len(blocks))
+	}
+	tb, ok := blocks[0].(types.TextBlock)
+	if !ok {
+		t.Fatalf("blocks[0]=%T, want TextBlock", blocks[0])
+	}
+	if tb.Type != "text" || tb.Text != "ok" {
+		t.Fatalf("TextBlock=%#v, want Type=text Text=ok", tb)
+	}
+}
+
+func TestSyncHistoryFromRunResult_FallbackUsesFullResponseContent(t *testing.T) {
+	t.Parallel()
+
+	state := &chatRuntime{
+		history: []vai.Message{
+			{Role: "user", Content: vai.Text("u1")},
+		},
+	}
+	result := &vai.RunResult{
+		Response: &vai.Response{
+			MessageResponse: &types.MessageResponse{
+				Type: "message",
+				Role: "assistant",
+				Content: []types.ContentBlock{
+					types.ToolUseBlock{
+						Type:  "tool_use",
+						ID:    "call_1",
+						Name:  "talk_to_user",
+						Input: map[string]any{"message": "hi"},
+					},
+				},
+			},
+		},
+	}
+
+	syncHistoryFromRunResult(state, result, "fallback text")
+
+	if len(state.history) != 2 {
+		t.Fatalf("history len=%d, want 2", len(state.history))
+	}
+	if state.history[1].Role != "assistant" {
+		t.Fatalf("history[1].Role=%q, want assistant", state.history[1].Role)
+	}
+	blocks := state.history[1].ContentBlocks()
+	if len(blocks) != 1 {
+		t.Fatalf("history[1].ContentBlocks len=%d, want 1", len(blocks))
+	}
+	if _, ok := blocks[0].(types.ToolUseBlock); !ok {
+		t.Fatalf("history[1].ContentBlocks[0]=%T, want ToolUseBlock", blocks[0])
+	}
+}
+
+func TestSyncHistoryFromRunResult_FallbackUsesAssistantText(t *testing.T) {
+	t.Parallel()
+
+	state := &chatRuntime{
+		history: []vai.Message{
+			{Role: "user", Content: vai.Text("u1")},
+		},
+	}
+	result := &vai.RunResult{
+		Response: &vai.Response{
+			MessageResponse: &types.MessageResponse{
+				Type:    "message",
+				Role:    "assistant",
+				Content: nil,
+			},
+		},
+	}
+
+	syncHistoryFromRunResult(state, result, "assistant fallback")
+	if len(state.history) != 2 {
+		t.Fatalf("history len=%d, want 2", len(state.history))
+	}
+	if got := state.history[1].TextContent(); got != "assistant fallback" {
+		t.Fatalf("assistant text=%q, want %q", got, "assistant fallback")
 	}
 }

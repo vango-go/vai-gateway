@@ -73,6 +73,73 @@ func TestRunStream_ExecutesToolWithReconstructedStreamInput(t *testing.T) {
 	}
 }
 
+func TestRunStream_SparseToolIndex_DoesNotCorruptRecursiveHistory(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	provider := newScriptedProvider(
+		"test",
+		toolTurnEventsForRunStreamAtIndex(1),
+		finalTextTurnEventsForRunStream("done"),
+	)
+
+	svc := newMessagesServiceForRunStreamTest(provider)
+
+	multiply := MakeTool("multiply", "Multiply two numbers", func(ctx context.Context, in struct {
+		A int `json:"a"`
+		B int `json:"b"`
+	}) (int, error) {
+		return in.A * in.B, nil
+	})
+
+	stream, err := svc.RunStream(ctx, &MessageRequest{
+		Model: "test/fake-model",
+		Messages: []Message{
+			{Role: "user", Content: Text("Multiply 6 by 7")},
+		},
+		MaxTokens: 1024,
+	}, WithTools(multiply))
+	if err != nil {
+		t.Fatalf("RunStream() returned error: %v", err)
+	}
+	defer stream.Close()
+
+	for range stream.Events() {
+	}
+
+	if err := stream.Err(); err != nil {
+		t.Fatalf("stream.Err() = %v, want nil", err)
+	}
+
+	result := stream.Result()
+	if result == nil {
+		t.Fatal("stream.Result() returned nil")
+	}
+	if result.StopReason != RunStopEndTurn {
+		t.Fatalf("StopReason = %q, want %q", result.StopReason, RunStopEndTurn)
+	}
+	if result.ToolCallCount != 1 {
+		t.Fatalf("ToolCallCount = %d, want 1", result.ToolCallCount)
+	}
+	if result.Response == nil {
+		t.Fatal("result.Response is nil")
+	}
+	if got := result.Response.TextContent(); got != "done" {
+		t.Fatalf("response text = %q, want %q", got, "done")
+	}
+
+	for mi, msg := range result.Messages {
+		for bi, block := range msg.ContentBlocks() {
+			if block == nil {
+				t.Fatalf("result.Messages[%d].content[%d] is nil", mi, bi)
+			}
+			if bt := block.BlockType(); bt == "" {
+				t.Fatalf("result.Messages[%d].content[%d] has empty type", mi, bi)
+			}
+		}
+	}
+}
+
 func TestRunStream_ToolCallStartEvent_EmittedOnceWithFullInput(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -358,6 +425,10 @@ func newMessagesServiceForRunStreamTest(provider core.Provider) *MessagesService
 }
 
 func toolTurnEventsForRunStream() []types.StreamEvent {
+	return toolTurnEventsForRunStreamAtIndex(0)
+}
+
+func toolTurnEventsForRunStreamAtIndex(index int) []types.StreamEvent {
 	delta := types.MessageDeltaEvent{Type: "message_delta"}
 	delta.Delta.StopReason = types.StopReasonToolUse
 
@@ -372,7 +443,7 @@ func toolTurnEventsForRunStream() []types.StreamEvent {
 		},
 		types.ContentBlockStartEvent{
 			Type:  "content_block_start",
-			Index: 0,
+			Index: index,
 			ContentBlock: types.ToolUseBlock{
 				Type:  "tool_use",
 				ID:    "call_1",
@@ -382,7 +453,7 @@ func toolTurnEventsForRunStream() []types.StreamEvent {
 		},
 		types.ContentBlockDeltaEvent{
 			Type:  "content_block_delta",
-			Index: 0,
+			Index: index,
 			Delta: types.InputJSONDelta{
 				Type:        "input_json_delta",
 				PartialJSON: `{"a":6,`,
@@ -390,7 +461,7 @@ func toolTurnEventsForRunStream() []types.StreamEvent {
 		},
 		types.ContentBlockDeltaEvent{
 			Type:  "content_block_delta",
-			Index: 0,
+			Index: index,
 			Delta: types.InputJSONDelta{
 				Type:        "input_json_delta",
 				PartialJSON: `"b":7}`,
@@ -398,7 +469,7 @@ func toolTurnEventsForRunStream() []types.StreamEvent {
 		},
 		types.ContentBlockStopEvent{
 			Type:  "content_block_stop",
-			Index: 0,
+			Index: index,
 		},
 		delta,
 		types.MessageStopEvent{Type: "message_stop"},
