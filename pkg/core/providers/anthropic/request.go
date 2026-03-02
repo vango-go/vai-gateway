@@ -114,14 +114,22 @@ func convertMessages(messages []types.Message) []messageJSON {
 		// Convert content to JSON
 		contentBlocks := msg.ContentBlocks()
 		for _, block := range contentBlocks {
-			blockJSON, err := json.Marshal(block)
+			sanitized, ok := sanitizeAnthropicInputBlock(block)
+			if !ok {
+				continue
+			}
+			blockJSON, err := json.Marshal(sanitized)
 			if err != nil {
 				continue // Skip invalid blocks
 			}
 			jsonMsg.Content = append(jsonMsg.Content, blockJSON)
 		}
 
-		result = append(result, jsonMsg)
+		// Anthropic rejects message text blocks with empty strings and can reject
+		// messages that have no content. Drop empty messages after sanitization.
+		if len(jsonMsg.Content) > 0 {
+			result = append(result, jsonMsg)
+		}
 	}
 
 	return result
@@ -245,20 +253,77 @@ func normalizeSystem(system any) any {
 	}
 
 	// If it's already a string, return as-is
-	if _, ok := system.(string); ok {
-		return system
+	if s, ok := system.(string); ok {
+		if s == "" {
+			return nil
+		}
+		return s
 	}
 
-	// If it's already a slice, return as-is
-	if _, ok := system.([]types.ContentBlock); ok {
-		return system
+	// If it's already a slice, sanitize before returning.
+	if blocks, ok := system.([]types.ContentBlock); ok {
+		out := make([]types.ContentBlock, 0, len(blocks))
+		for _, block := range blocks {
+			if sanitized, ok := sanitizeAnthropicInputBlock(block); ok {
+				out = append(out, sanitized)
+			}
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
 	}
 
-	// If it's a single ContentBlock, wrap in a slice
+	// If it's a single ContentBlock, sanitize and wrap in a slice.
 	if block, ok := system.(types.ContentBlock); ok {
-		return []types.ContentBlock{block}
+		if sanitized, ok := sanitizeAnthropicInputBlock(block); ok {
+			return []types.ContentBlock{sanitized}
+		}
+		return nil
 	}
 
 	// For any other type, return as-is and let the API validate
 	return system
+}
+
+func sanitizeAnthropicInputBlock(block types.ContentBlock) (types.ContentBlock, bool) {
+	switch b := block.(type) {
+	case types.TextBlock:
+		if b.Text == "" {
+			return nil, false
+		}
+		return b, true
+	case *types.TextBlock:
+		if b == nil || b.Text == "" {
+			return nil, false
+		}
+		return *b, true
+	case types.ToolResultBlock:
+		sanitized := b
+		if len(b.Content) > 0 {
+			sanitized.Content = make([]types.ContentBlock, 0, len(b.Content))
+			for _, child := range b.Content {
+				if cleaned, ok := sanitizeAnthropicInputBlock(child); ok {
+					sanitized.Content = append(sanitized.Content, cleaned)
+				}
+			}
+		}
+		return sanitized, true
+	case *types.ToolResultBlock:
+		if b == nil {
+			return nil, false
+		}
+		sanitized := *b
+		if len(b.Content) > 0 {
+			sanitized.Content = make([]types.ContentBlock, 0, len(b.Content))
+			for _, child := range b.Content {
+				if cleaned, ok := sanitizeAnthropicInputBlock(child); ok {
+					sanitized.Content = append(sanitized.Content, cleaned)
+				}
+			}
+		}
+		return sanitized, true
+	default:
+		return block, true
+	}
 }

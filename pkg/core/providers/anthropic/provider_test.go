@@ -489,6 +489,117 @@ func TestStripProviderPrefix(t *testing.T) {
 	}
 }
 
+func TestConvertMessages_SkipsEmptyTextBlocksAndEmptyMessages(t *testing.T) {
+	msgs := []types.Message{
+		{Role: "user", Content: "hello"},
+		{
+			Role: "assistant",
+			Content: []types.ContentBlock{
+				types.TextBlock{Type: "text", Text: ""},
+				types.ToolUseBlock{Type: "tool_use", ID: "call_1", Name: "talk_to_user", Input: map[string]any{"content": "hello"}},
+			},
+		},
+		{
+			Role: "assistant",
+			Content: []types.ContentBlock{
+				types.TextBlock{Type: "text", Text: ""},
+			},
+		},
+	}
+
+	got := convertMessages(msgs)
+	if len(got) != 2 {
+		t.Fatalf("messages=%d, want 2", len(got))
+	}
+	if len(got[0].Content) != 1 {
+		t.Fatalf("first message content len=%d, want 1", len(got[0].Content))
+	}
+	if len(got[1].Content) != 1 {
+		t.Fatalf("second message content len=%d, want 1", len(got[1].Content))
+	}
+
+	var typeHolder struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(got[1].Content[0], &typeHolder); err != nil {
+		t.Fatalf("unmarshal content: %v", err)
+	}
+	if typeHolder.Type != "tool_use" {
+		t.Fatalf("content type=%q, want tool_use", typeHolder.Type)
+	}
+}
+
+func TestConvertMessages_SanitizesNestedToolResultText(t *testing.T) {
+	msgs := []types.Message{
+		{
+			Role: "user",
+			Content: []types.ContentBlock{
+				types.ToolResultBlock{
+					Type:      "tool_result",
+					ToolUseID: "call_1",
+					Content: []types.ContentBlock{
+						types.TextBlock{Type: "text", Text: ""},
+						types.TextBlock{Type: "text", Text: "ok"},
+					},
+				},
+			},
+		},
+	}
+
+	got := convertMessages(msgs)
+	if len(got) != 1 {
+		t.Fatalf("messages=%d, want 1", len(got))
+	}
+	if len(got[0].Content) != 1 {
+		t.Fatalf("message content len=%d, want 1", len(got[0].Content))
+	}
+
+	var block struct {
+		Type    string `json:"type"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(got[0].Content[0], &block); err != nil {
+		t.Fatalf("unmarshal tool_result: %v", err)
+	}
+	if block.Type != "tool_result" {
+		t.Fatalf("block type=%q, want tool_result", block.Type)
+	}
+	if len(block.Content) != 1 {
+		t.Fatalf("tool_result content len=%d, want 1", len(block.Content))
+	}
+	if block.Content[0].Type != "text" || block.Content[0].Text != "ok" {
+		t.Fatalf("unexpected tool_result content: %+v", block.Content[0])
+	}
+}
+
+func TestNormalizeSystem_OmitsEmptyText(t *testing.T) {
+	if got := normalizeSystem(""); got != nil {
+		t.Fatalf("normalizeSystem(\"\")=%v, want nil", got)
+	}
+
+	got := normalizeSystem([]types.ContentBlock{
+		types.TextBlock{Type: "text", Text: ""},
+		types.TextBlock{Type: "text", Text: "policy"},
+	})
+	blocks, ok := got.([]types.ContentBlock)
+	if !ok {
+		t.Fatalf("normalizeSystem returned %T, want []types.ContentBlock", got)
+	}
+	if len(blocks) != 1 {
+		t.Fatalf("system blocks=%d, want 1", len(blocks))
+	}
+	tb, ok := blocks[0].(types.TextBlock)
+	if !ok {
+		t.Fatalf("system block type=%T, want TextBlock", blocks[0])
+	}
+	if tb.Text != "policy" {
+		t.Fatalf("system text=%q, want %q", tb.Text, "policy")
+	}
+}
+
 func TestError_Error(t *testing.T) {
 	err := &Error{
 		Type:    ErrInvalidRequest,
