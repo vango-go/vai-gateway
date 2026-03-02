@@ -3,6 +3,7 @@ package runloop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/vango-go/vai-lite/pkg/core"
+	"github.com/vango-go/vai-lite/pkg/core/providers/gemini"
 	"github.com/vango-go/vai-lite/pkg/core/types"
 	"github.com/vango-go/vai-lite/pkg/core/voice"
 	"github.com/vango-go/vai-lite/pkg/core/voice/tts"
@@ -554,5 +556,49 @@ func TestRunBlocking_ParallelVsSequentialToolExecution(t *testing.T) {
 	}
 	if seqExec.MaxInFlight() != 1 {
 		t.Fatalf("sequential max_in_flight=%d, expected sequential execution", seqExec.MaxInFlight())
+	}
+}
+
+func TestToTypesError_GeminiErrorMapped(t *testing.T) {
+	got := toTypesError(&gemini.Error{
+		Type:          gemini.ErrRateLimit,
+		Message:       "quota exceeded",
+		Code:          "RESOURCE_EXHAUSTED",
+		ProviderError: map[string]any{"status": "RESOURCE_EXHAUSTED"},
+	}, "req_test")
+
+	if got.Type != string(core.ErrRateLimit) {
+		t.Fatalf("type=%q", got.Type)
+	}
+	if got.Message != "quota exceeded" {
+		t.Fatalf("message=%q", got.Message)
+	}
+	if got.Code != "RESOURCE_EXHAUSTED" {
+		t.Fatalf("code=%q", got.Code)
+	}
+	if got.RequestID != "req_test" {
+		t.Fatalf("request_id=%q", got.RequestID)
+	}
+	if got.ProviderError == nil {
+		t.Fatal("provider_error should be preserved")
+	}
+}
+
+func TestToTypesError_UnknownErrorKeepsCauseInProviderError(t *testing.T) {
+	got := toTypesError(errors.New("boom"), "req_test")
+	if got.Type != string(core.ErrAPI) {
+		t.Fatalf("type=%q", got.Type)
+	}
+	if got.Message != "internal error" {
+		t.Fatalf("message=%q", got.Message)
+	}
+	if got.RequestID != "req_test" {
+		t.Fatalf("request_id=%q", got.RequestID)
+	}
+	if got.ProviderError == nil {
+		t.Fatal("provider_error should contain original cause")
+	}
+	if got.ProviderError.(string) != "boom" {
+		t.Fatalf("provider_error=%v", got.ProviderError)
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -381,7 +382,7 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 		if err != nil {
 			cancel()
 			state.history = state.history[:beforeLen]
-			fmt.Fprintf(errOut, "run stream setup error: %v\n", err)
+			fmt.Fprintf(errOut, "run stream setup error: %s\n", formatDetailedError(err))
 			continue
 		}
 
@@ -393,7 +394,7 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 			cancel()
 			state.history = state.history[:beforeLen]
 			fmt.Fprintln(out)
-			fmt.Fprintf(errOut, "run stream error: %v\n", processErr)
+			fmt.Fprintf(errOut, "run stream error: %s\n", formatDetailedError(processErr))
 			continue
 		}
 
@@ -762,6 +763,67 @@ func closeOpenToolStreamLine(out io.Writer, state *streamPrintState) {
 	}
 	state.openToolLineIndex = -1
 	state.openToolLineAtLineStart = false
+}
+
+func formatDetailedError(err error) string {
+	if err == nil {
+		return ""
+	}
+	message := err.Error()
+	details := make([]string, 0, 6)
+
+	var transportErr *vai.TransportError
+	if errors.As(err, &transportErr) && transportErr != nil {
+		if transportErr.Op != "" {
+			details = append(details, "op="+transportErr.Op)
+		}
+		if transportErr.URL != "" {
+			details = append(details, "url="+transportErr.URL)
+		}
+	}
+
+	var coreErr *core.Error
+	if errors.As(err, &coreErr) && coreErr != nil {
+		if coreErr.Param != "" {
+			details = append(details, "param="+coreErr.Param)
+		}
+		if coreErr.Code != "" {
+			details = append(details, "code="+coreErr.Code)
+		}
+		if coreErr.RequestID != "" {
+			details = append(details, "request_id="+coreErr.RequestID)
+		}
+		if coreErr.RetryAfter != nil {
+			details = append(details, fmt.Sprintf("retry_after=%ds", *coreErr.RetryAfter))
+		}
+		if coreErr.ProviderError != nil {
+			details = append(details, "provider_error="+compactJSON(coreErr.ProviderError))
+		}
+	}
+
+	if len(details) > 0 {
+		message += " [" + strings.Join(details, " ") + "]"
+	}
+
+	seen := map[string]struct{}{err.Error(): {}}
+	for cause := errors.Unwrap(err); cause != nil; cause = errors.Unwrap(cause) {
+		causeText := cause.Error()
+		if _, exists := seen[causeText]; exists {
+			continue
+		}
+		seen[causeText] = struct{}{}
+		message += "\ncaused by: " + causeText
+	}
+
+	return message
+}
+
+func compactJSON(v any) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprintf("%v", v)
+	}
+	return string(b)
 }
 
 func main() {

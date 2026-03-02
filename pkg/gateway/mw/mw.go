@@ -6,9 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -89,13 +91,19 @@ func Recover(logger *slog.Logger, next http.Handler) http.Handler {
 		defer func() {
 			if v := recover(); v != nil {
 				reqID, _ := RequestIDFrom(r.Context())
+				panicText := fmt.Sprint(v)
+				stack := string(debug.Stack())
 				if logger != nil {
-					logger.Error("panic", "panic", v, "request_id", reqID)
+					logger.Error("panic", "panic", panicText, "request_id", reqID, "stack", stack)
 				}
 				writeJSONError(w, http.StatusInternalServerError, &core.Error{
 					Type:      core.ErrAPI,
 					Message:   "internal error",
 					RequestID: reqID,
+					Code:      "panic",
+					ProviderError: map[string]any{
+						"panic": panicText,
+					},
 				})
 			}
 		}()

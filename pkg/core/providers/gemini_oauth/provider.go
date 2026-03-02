@@ -316,7 +316,9 @@ func (p *Provider) buildRequest(req *types.MessageRequest) *geminiRequest {
 
 	// Translate system instruction
 	if req.System != nil {
-		geminiReq.SystemInstruction = p.translateSystemInstruction(req.System)
+		if system := p.translateSystemInstruction(req.System); system != nil && len(system.Parts) > 0 {
+			geminiReq.SystemInstruction = system
+		}
 	}
 
 	// Translate messages to contents
@@ -376,11 +378,15 @@ func (p *Provider) translateSystemInstruction(system any) *geminiContent {
 
 	switch s := system.(type) {
 	case string:
-		content.Parts = append(content.Parts, geminiPart{Text: s})
+		if s != "" {
+			content.Parts = append(content.Parts, geminiPart{Text: s})
+		}
 	case []types.ContentBlock:
 		for _, block := range s {
 			if tb, ok := block.(types.TextBlock); ok {
-				content.Parts = append(content.Parts, geminiPart{Text: tb.Text})
+				if tb.Text != "" {
+					content.Parts = append(content.Parts, geminiPart{Text: tb.Text})
+				}
 			}
 		}
 	}
@@ -433,7 +439,9 @@ func (p *Provider) translateMessages(messages []types.Message) []geminiContent {
 			Role:  role,
 			Parts: p.translateContentBlocks(blocks),
 		}
-
+		if len(content.Parts) == 0 {
+			continue
+		}
 		contents = append(contents, content)
 	}
 
@@ -446,6 +454,9 @@ func (p *Provider) translateContentBlocks(blocks []types.ContentBlock) []geminiP
 	for _, block := range blocks {
 		switch b := block.(type) {
 		case types.TextBlock:
+			if b.Text == "" {
+				continue
+			}
 			parts = append(parts, geminiPart{Text: b.Text})
 
 		case types.ImageBlock:

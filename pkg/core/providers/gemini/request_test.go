@@ -152,3 +152,46 @@ func TestBuildRequest_StreamFunctionCallArgumentsExtension(t *testing.T) {
 		}
 	})
 }
+
+func TestBuildRequest_SkipsEmptyTextPartsAndMessages(t *testing.T) {
+	provider := New("test-key")
+
+	req := &types.MessageRequest{
+		Model:  "gemini/gemini-3-flash-preview",
+		System: "",
+		Messages: []types.Message{
+			{Role: "user", Content: []types.ContentBlock{
+				types.TextBlock{Type: "text", Text: "hello"},
+			}},
+			{Role: "assistant", Content: []types.ContentBlock{
+				types.TextBlock{Type: "text", Text: ""},
+			}},
+			{Role: "user", Content: []types.ContentBlock{
+				types.TextBlock{Type: "text", Text: ""},
+				types.TextBlock{Type: "text", Text: "world"},
+			}},
+		},
+	}
+
+	got := provider.buildRequest(req)
+	if got.SystemInstruction != nil {
+		t.Fatalf("system instruction should be omitted when empty: %#v", got.SystemInstruction)
+	}
+	if len(got.Contents) != 2 {
+		t.Fatalf("contents=%d, want 2", len(got.Contents))
+	}
+	if got.Contents[0].Role != "user" || len(got.Contents[0].Parts) != 1 || got.Contents[0].Parts[0].Text != "hello" {
+		t.Fatalf("unexpected first content: %#v", got.Contents[0])
+	}
+	if got.Contents[1].Role != "user" || len(got.Contents[1].Parts) != 1 || got.Contents[1].Parts[0].Text != "world" {
+		t.Fatalf("unexpected second content: %#v", got.Contents[1])
+	}
+
+	for i, c := range got.Contents {
+		for j, p := range c.Parts {
+			if p.Text == "" && p.InlineData == nil && p.FileData == nil && p.FunctionCall == nil && p.FunctionResponse == nil {
+				t.Fatalf("empty part at content[%d].parts[%d]: %#v", i, j, p)
+			}
+		}
+	}
+}

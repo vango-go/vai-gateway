@@ -12,6 +12,7 @@ import (
 	"github.com/vango-go/vai-lite/pkg/core"
 	"github.com/vango-go/vai-lite/pkg/core/types"
 	"github.com/vango-go/vai-lite/pkg/core/voice"
+	"github.com/vango-go/vai-lite/pkg/gateway/apierror"
 )
 
 type EmitFunc func(event types.RunStreamEvent) error
@@ -504,27 +505,15 @@ func stopReasonFromContext(err error) (types.RunStopReason, bool) {
 }
 
 func toTypesError(err error, requestID string) types.Error {
-	coreErr, _ := func() (*core.Error, int) {
-		if err == nil {
-			return nil, 0
-		}
-		if errors.Is(err, context.Canceled) {
-			return &core.Error{Type: core.ErrAPI, Message: "request cancelled", Code: "cancelled", RequestID: requestID}, 408
-		}
-		if errors.Is(err, context.DeadlineExceeded) {
-			return &core.Error{Type: core.ErrAPI, Message: "request timeout", RequestID: requestID}, 504
-		}
-		var ce *core.Error
-		if errors.As(err, &ce) && ce != nil {
-			dup := *ce
-			dup.RequestID = requestID
-			return &dup, 0
-		}
-		return &core.Error{Type: core.ErrAPI, Message: err.Error(), RequestID: requestID}, 0
-	}()
+	coreErr, _ := apierror.FromError(err, requestID)
 
 	if coreErr == nil {
 		return types.Error{Type: string(core.ErrAPI), Message: "internal error", RequestID: requestID}
+	}
+	// Preserve raw cause text for stream-level diagnostics when the mapper falls
+	// back to a generic internal error.
+	if coreErr.Type == core.ErrAPI && coreErr.Message == "internal error" && coreErr.ProviderError == nil && err != nil {
+		coreErr.ProviderError = err.Error()
 	}
 	return types.Error{
 		Type:          string(coreErr.Type),

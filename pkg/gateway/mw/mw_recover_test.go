@@ -34,6 +34,16 @@ func TestRecover_PanicReturnsCanonicalJSON(t *testing.T) {
 	if env.Error.Type != core.ErrAPI {
 		t.Fatalf("type=%q", env.Error.Type)
 	}
+	if env.Error.Code != "panic" {
+		t.Fatalf("code=%q", env.Error.Code)
+	}
+	panicObj, ok := env.Error.ProviderError.(map[string]any)
+	if !ok {
+		t.Fatalf("provider_error=%T, want map[string]any", env.Error.ProviderError)
+	}
+	if panicObj["panic"] != "boom" {
+		t.Fatalf("provider_error.panic=%v", panicObj["panic"])
+	}
 	if env.Error.RequestID == "" {
 		t.Fatalf("expected request_id to be set")
 	}

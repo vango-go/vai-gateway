@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/vango-go/vai-lite/pkg/core"
 	"github.com/vango-go/vai-lite/pkg/core/types"
 	vai "github.com/vango-go/vai-lite/sdk"
 )
@@ -799,5 +802,59 @@ func TestSyncHistoryFromRunResult_FallbackUsesAssistantText(t *testing.T) {
 	}
 	if got := state.history[1].TextContent(); got != "assistant fallback" {
 		t.Fatalf("assistant text=%q, want %q", got, "assistant fallback")
+	}
+}
+
+func TestFormatDetailedError_IncludesCoreFields(t *testing.T) {
+	t.Parallel()
+
+	retryAfter := 7
+	err := &core.Error{
+		Type:          core.ErrAPI,
+		Message:       "internal error",
+		Code:          "INTERNAL",
+		Param:         "messages[0]",
+		RequestID:     "req_123",
+		RetryAfter:    &retryAfter,
+		ProviderError: map[string]any{"status": "RESOURCE_EXHAUSTED", "message": "quota exceeded"},
+	}
+
+	got := formatDetailedError(err)
+	if !strings.Contains(got, "api_error: internal error") {
+		t.Fatalf("missing base error text, got=%q", got)
+	}
+	if !strings.Contains(got, "param=messages[0]") {
+		t.Fatalf("missing param details, got=%q", got)
+	}
+	if !strings.Contains(got, "code=INTERNAL") {
+		t.Fatalf("missing code details, got=%q", got)
+	}
+	if !strings.Contains(got, "request_id=req_123") {
+		t.Fatalf("missing request_id details, got=%q", got)
+	}
+	if !strings.Contains(got, "retry_after=7s") {
+		t.Fatalf("missing retry_after details, got=%q", got)
+	}
+	if !strings.Contains(got, `provider_error={"message":"quota exceeded","status":"RESOURCE_EXHAUSTED"}`) {
+		t.Fatalf("missing provider_error details, got=%q", got)
+	}
+}
+
+func TestFormatDetailedError_UnwrapsCauseChain(t *testing.T) {
+	t.Parallel()
+
+	root := errors.New("root cause")
+	wrapped := fmt.Errorf("layer 1: %w", root)
+	err := fmt.Errorf("top level: %w", wrapped)
+
+	got := formatDetailedError(err)
+	if !strings.Contains(got, "top level: layer 1: root cause") {
+		t.Fatalf("missing top-level text, got=%q", got)
+	}
+	if !strings.Contains(got, "caused by: layer 1: root cause") {
+		t.Fatalf("missing first cause line, got=%q", got)
+	}
+	if !strings.Contains(got, "caused by: root cause") {
+		t.Fatalf("missing root cause line, got=%q", got)
 	}
 }
