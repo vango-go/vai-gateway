@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -52,8 +51,7 @@ type streamPrintState struct {
 	openToolLineAtLineStart bool
 	toolStateInitialized    bool
 
-	talkRawByIndex              map[int]string
-	talkDecodedByIndex          map[int]string
+	talkDecoderByIndex          map[int]*vai.ToolArgStringDecoder
 	talkPrintedByIndex          map[int]bool
 	talkEndedWithNewlineByIndex map[int]bool
 }
@@ -447,15 +445,18 @@ func buildStreamCallbacks(out io.Writer, printState *streamPrintState) vai.Strea
 
 			if isTalkToUserTool(meta.name) {
 				closeOpenToolStreamLine(out, printState)
-				printState.talkRawByIndex[index] += partialJSON
-				decoded, found := extractSpokenPrefixFromToolArgs(printState.talkRawByIndex[index])
-				if !found {
+				decoder := printState.talkDecoderByIndex[index]
+				if decoder == nil {
+					decoder = vai.NewToolArgStringDecoder(vai.ToolArgStringDecoderOptions{
+						Keys: []string{"content", "message", "text"},
+					})
+					printState.talkDecoderByIndex[index] = decoder
+				}
+				update := decoder.Push(partialJSON)
+				if !update.Found || update.Delta == "" {
 					return
 				}
-				prev := printState.talkDecodedByIndex[index]
-				suffix := decodedSuffix(prev, decoded)
-				printState.talkDecodedByIndex[index] = decoded
-				emitTalkSuffix(out, printState, index, suffix)
+				emitTalkSuffix(out, printState, index, update.Delta)
 				return
 			}
 			streamToolInputDelta(out, printState, index, displayToolName(meta.name), partialJSON)
@@ -475,8 +476,7 @@ func buildStreamCallbacks(out io.Writer, printState *streamPrintState) vai.Strea
 			}
 			delete(printState.toolMetaByIndex, index)
 			delete(printState.toolLineStartedByIndex, index)
-			delete(printState.talkRawByIndex, index)
-			delete(printState.talkDecodedByIndex, index)
+			delete(printState.talkDecoderByIndex, index)
 			delete(printState.talkPrintedByIndex, index)
 			delete(printState.talkEndedWithNewlineByIndex, index)
 		},
@@ -552,11 +552,8 @@ func initToolStreamState(state *streamPrintState) {
 	if state.toolLineStartedByIndex == nil {
 		state.toolLineStartedByIndex = make(map[int]bool)
 	}
-	if state.talkRawByIndex == nil {
-		state.talkRawByIndex = make(map[int]string)
-	}
-	if state.talkDecodedByIndex == nil {
-		state.talkDecodedByIndex = make(map[int]string)
+	if state.talkDecoderByIndex == nil {
+		state.talkDecoderByIndex = make(map[int]*vai.ToolArgStringDecoder)
 	}
 	if state.talkPrintedByIndex == nil {
 		state.talkPrintedByIndex = make(map[int]bool)
@@ -616,137 +613,6 @@ func emitTalkSuffix(out io.Writer, state *streamPrintState, index int, suffix st
 	fmt.Fprint(out, suffix)
 	state.talkPrintedByIndex[index] = true
 	state.talkEndedWithNewlineByIndex[index] = suffix[len(suffix)-1] == '\n'
-}
-
-func decodedSuffix(previous string, current string) string {
-	if previous == "" {
-		return current
-	}
-	if strings.HasPrefix(current, previous) {
-		return current[len(previous):]
-	}
-	// Fallback for parser resync: emit only the changed tail from the common prefix.
-	common := commonPrefixLen(previous, current)
-	if common >= len(current) {
-		return ""
-	}
-	return current[common:]
-}
-
-func commonPrefixLen(a string, b string) int {
-	limit := len(a)
-	if len(b) < limit {
-		limit = len(b)
-	}
-	i := 0
-	for i < limit && a[i] == b[i] {
-		i++
-	}
-	return i
-}
-
-func extractSpokenPrefixFromToolArgs(raw string) (decoded string, found bool) {
-	for _, key := range []string{"content", "message", "text"} {
-		if decoded, found := extractJSONStringFieldPrefix(raw, key); found {
-			return decoded, true
-		}
-	}
-	return "", false
-}
-
-func extractJSONStringFieldPrefix(raw string, key string) (decoded string, found bool) {
-	if raw == "" || key == "" {
-		return "", false
-	}
-	field := `"` + key + `"`
-	searchPos := 0
-	for searchPos < len(raw) {
-		idx := strings.Index(raw[searchPos:], field)
-		if idx < 0 {
-			return "", false
-		}
-		idx += searchPos
-		pos := idx + len(field)
-
-		for pos < len(raw) && isJSONWhitespace(raw[pos]) {
-			pos++
-		}
-		if pos >= len(raw) || raw[pos] != ':' {
-			searchPos = idx + 1
-			continue
-		}
-		pos++
-		for pos < len(raw) && isJSONWhitespace(raw[pos]) {
-			pos++
-		}
-		if pos >= len(raw) {
-			return "", false
-		}
-		if raw[pos] != '"' {
-			searchPos = idx + 1
-			continue
-		}
-		return decodeJSONStringPrefix(raw[pos+1:]), true
-	}
-	return "", false
-}
-
-func isJSONWhitespace(b byte) bool {
-	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
-}
-
-func decodeJSONStringPrefix(raw string) string {
-	var out strings.Builder
-	for i := 0; i < len(raw); {
-		ch := raw[i]
-		if ch == '"' {
-			return out.String()
-		}
-		if ch != '\\' {
-			out.WriteByte(ch)
-			i++
-			continue
-		}
-		if i+1 >= len(raw) {
-			return out.String()
-		}
-		esc := raw[i+1]
-		switch esc {
-		case '"', '\\', '/':
-			out.WriteByte(esc)
-			i += 2
-		case 'b':
-			out.WriteByte('\b')
-			i += 2
-		case 'f':
-			out.WriteByte('\f')
-			i += 2
-		case 'n':
-			out.WriteByte('\n')
-			i += 2
-		case 'r':
-			out.WriteByte('\r')
-			i += 2
-		case 't':
-			out.WriteByte('\t')
-			i += 2
-		case 'u':
-			if i+5 >= len(raw) {
-				return out.String()
-			}
-			hex := raw[i+2 : i+6]
-			v, err := strconv.ParseUint(hex, 16, 16)
-			if err != nil {
-				return out.String()
-			}
-			out.WriteRune(rune(v))
-			i += 6
-		default:
-			// Tolerate unknown/incomplete escapes as partial prefix.
-			return out.String()
-		}
-	}
-	return out.String()
 }
 
 func closeOpenToolStreamLine(out io.Writer, state *streamPrintState) {

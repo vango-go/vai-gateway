@@ -100,6 +100,39 @@ func main() {
 }
 ```
 
+## Streaming Tool Args For TTS/Captions
+
+Use `RunStream.Process` plus per-tool-index `ToolArgStringDecoder` instances to
+decode streamed `input_json_delta` fragments into readable text in real time.
+
+```go
+decoders := map[int]*vai.ToolArgStringDecoder{}
+
+_, err = stream.Process(vai.StreamCallbacks{
+	OnToolUseStart: func(index int, id, name string) {
+		if name == "talk_to_user" {
+			decoders[index] = vai.NewToolArgStringDecoder(vai.ToolArgStringDecoderOptions{})
+		}
+	},
+	OnToolInputDelta: func(index int, id, name, partialJSON string) {
+		decoder := decoders[index]
+		if decoder == nil {
+			return
+		}
+		update := decoder.Push(partialJSON)
+		if update.Found && update.Delta != "" {
+			fmt.Print(update.Delta) // feed TTS/captions incrementally
+		}
+	},
+	OnToolUseStop: func(index int, id, name string) {
+		delete(decoders, index)
+	},
+})
+if err != nil {
+	panic(err)
+}
+```
+
 ## Proxy Chatbot Demo
 
 Run the gateway in one terminal and an interactive `RunStream` chatbot in another.

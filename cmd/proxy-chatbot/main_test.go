@@ -641,6 +641,27 @@ func TestBuildStreamCallbacks_TalkToUser_HandlesEscapesAcrossChunks(t *testing.T
 	}
 }
 
+func TestBuildStreamCallbacks_TalkToUser_LocksFirstDetectedCandidateKey(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+	state := &streamPrintState{}
+	callbacks := buildStreamCallbacks(&out, state)
+
+	callbacks.OnToolUseStart(9, "call_lock", "talk_to_user")
+	callbacks.OnToolInputDelta(9, "call_lock", "talk_to_user", `{"message":"hel`)
+	callbacks.OnToolInputDelta(9, "call_lock", "talk_to_user", `lo","content":"should-not-emit"}`)
+	callbacks.OnToolUseStop(9, "call_lock", "talk_to_user")
+
+	got := out.String()
+	if !strings.Contains(got, "hello\n") {
+		t.Fatalf("expected spoken output from first detected key, got=%q", got)
+	}
+	if strings.Contains(got, "should-not-emit") {
+		t.Fatalf("unexpected output from later candidate key after lock, got=%q", got)
+	}
+}
+
 func TestBuildStreamCallbacks_TalkToUser_HidesExecutionMarker(t *testing.T) {
 	t.Parallel()
 
