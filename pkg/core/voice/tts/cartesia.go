@@ -5,134 +5,132 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 const (
-	cartesiaBaseURL = "https://api.cartesia.ai"
-	cartesiaWSURL   = "wss://api.cartesia.ai/tts/websocket"
-	cartesiaVersion = "2025-04-16"
-)
+	cartesiaTTSBaseURL    = "https://api.cartesia.ai"
+	cartesiaTTSWSBase     = "wss://api.cartesia.ai/tts/websocket"
+	cartesiaTTSAPIVersion = "2025-04-16"
+	cartesiaTTSDefaultModel = "sonic-3"
 
-// Default voice ID - users should provide their own voice IDs
-const defaultVoiceID = "a0e99841-438c-4a64-b679-ae501e7d6091"
+	// defaultMaxBufferDelayMs matches the Cartesia docs default.
+	// Controls how long Cartesia buffers text before generating,
+	// trading latency for quality.
+	defaultMaxBufferDelayMs = 3000
+)
 
 // CartesiaProvider implements the TTS Provider interface using Cartesia's API.
 type CartesiaProvider struct {
 	apiKey     string
 	httpClient *http.Client
+	wsBaseURL  string
 }
 
 // NewCartesia creates a new Cartesia TTS provider.
 func NewCartesia(apiKey string) *CartesiaProvider {
 	return &CartesiaProvider{
-		apiKey:     apiKey,
+		apiKey:     strings.TrimSpace(apiKey),
 		httpClient: &http.Client{},
+		wsBaseURL:  cartesiaTTSWSBase,
 	}
 }
 
 // NewCartesiaWithClient creates a new Cartesia TTS provider with a custom HTTP client.
 func NewCartesiaWithClient(apiKey string, client *http.Client) *CartesiaProvider {
+	if client == nil {
+		client = &http.Client{}
+	}
 	return &CartesiaProvider{
-		apiKey:     apiKey,
+		apiKey:     strings.TrimSpace(apiKey),
 		httpClient: client,
+		wsBaseURL:  cartesiaTTSWSBase,
 	}
 }
 
-// Name returns the provider identifier.
 func (c *CartesiaProvider) Name() string {
 	return "cartesia"
 }
 
-// Synthesize converts text to audio using Cartesia's TTS API.
+// ---------------------------------------------------------------------------
+// Synthesize — HTTP /tts/bytes (non-streaming, full audio blob)
+// ---------------------------------------------------------------------------
+
+// Synthesize converts text to audio via Cartesia's HTTP endpoint.
+// Returns complete audio in the requested format (wav/mp3/pcm).
 func (c *CartesiaProvider) Synthesize(ctx context.Context, text string, opts SynthesizeOptions) (*Synthesis, error) {
-	voiceID := opts.Voice
-	if voiceID == "" {
-		voiceID = defaultVoiceID
+	if c == nil || strings.TrimSpace(c.apiKey) == "" {
+		return nil, fmt.Errorf("cartesia api key is required")
+	}
+	if strings.TrimSpace(opts.Voice) == "" {
+		return nil, fmt.Errorf("voice id is required")
 	}
 
-	// Build output format
-	outputFormat := c.buildOutputFormat(opts)
-	modelID := strings.TrimSpace(opts.Model)
-	if modelID == "" {
-		modelID = "sonic-3"
+	model := strings.TrimSpace(opts.Model)
+	if model == "" {
+		model = cartesiaTTSDefaultModel
 	}
 
-	// Build request body
-	reqBody := cartesiaTTSRequest{
-		ModelID:    modelID,
+	outFmt := buildHTTPOutputFormat(opts)
+	body := cartesiaHTTPRequest{
+		ModelID:    model,
 		Transcript: text,
 		Voice: cartesiaVoiceSpec{
 			Mode: "id",
-			ID:   voiceID,
+			ID:   strings.TrimSpace(opts.Voice),
 		},
-		OutputFormat: outputFormat,
+		OutputFormat: outFmt,
 	}
-
-	// Add generation config if speed/volume/emotion specified
-	if opts.Speed != 0 || opts.Volume != 0 || opts.Emotion != "" {
-		genConfig := &cartesiaGenerationConfig{}
-		if opts.Speed != 0 {
-			genConfig.Speed = opts.Speed
-		}
-		if opts.Volume != 0 {
-			genConfig.Volume = opts.Volume
-		}
-		if opts.Emotion != "" {
-			genConfig.Emotion = opts.Emotion
-		}
-		reqBody.GenerationConfig = genConfig
-	}
-
 	if opts.Language != "" {
-		reqBody.Language = &opts.Language
+		body.Language = opts.Language
+	}
+	if opts.Speed != 0 || opts.Volume != 0 || opts.Emotion != "" {
+		body.GenerationConfig = &cartesiaGenerationConfig{
+			Speed:   opts.Speed,
+			Volume:  opts.Volume,
+			Emotion: opts.Emotion,
+		}
 	}
 
-	body, err := json.Marshal(reqBody)
+	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	// Create request
-	req, err := http.NewRequestWithContext(ctx, "POST", cartesiaBaseURL+"/tts/bytes", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", cartesiaTTSBaseURL+"/tts/bytes", bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
-	req.Header.Set("Cartesia-Version", cartesiaVersion)
+	req.Header.Set("Cartesia-Version", cartesiaTTSAPIVersion)
 	req.Header.Set("Content-Type", "application/json")
 
-	// Execute
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("cartesia request: %w", err)
+		return nil, fmt.Errorf("cartesia tts request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNoContent {
-		return &Synthesis{Audio: []byte{}, Format: getFormat(opts.Format)}, nil
+		return &Synthesis{Audio: nil, Format: getFormat(opts.Format)}, nil
 	}
-
 	if resp.StatusCode != http.StatusOK {
 		errBody, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("cartesia error %d: %s", resp.StatusCode, string(errBody))
+		return nil, fmt.Errorf("cartesia tts error %d: %s", resp.StatusCode, string(errBody))
 	}
 
-	// Read audio
 	audio, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read audio: %w", err)
+		return nil, fmt.Errorf("read response: %w", err)
 	}
 
 	return &Synthesis{
@@ -141,13 +139,253 @@ func (c *CartesiaProvider) Synthesize(ctx context.Context, text string, opts Syn
 	}, nil
 }
 
-type cartesiaTTSRequest struct {
+// ---------------------------------------------------------------------------
+// SynthesizeStream — thin wrapper over NewStreamingContext
+// ---------------------------------------------------------------------------
+
+// SynthesizeStream converts text to streaming audio.
+// Creates a streaming context, sends the full text, and bridges audio chunks
+// into a SynthesisStream.
+func (c *CartesiaProvider) SynthesizeStream(ctx context.Context, text string, opts SynthesizeOptions) (*SynthesisStream, error) {
+	sc, err := c.NewStreamingContext(ctx, StreamingContextOptions{
+		Model:      opts.Model,
+		Voice:      opts.Voice,
+		Language:   opts.Language,
+		Speed:      opts.Speed,
+		Volume:     opts.Volume,
+		Emotion:    opts.Emotion,
+		Format:     opts.Format,
+		SampleRate: opts.SampleRate,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	stream := NewSynthesisStream()
+	if err := sc.SendText(text, false); err != nil {
+		_ = sc.Close()
+		return nil, err
+	}
+	if err := sc.Flush(); err != nil {
+		_ = sc.Close()
+		return nil, err
+	}
+
+	go func() {
+		defer stream.FinishSending()
+		defer sc.Close()
+		for chunk := range sc.Audio() {
+			if !stream.Send(chunk) {
+				return
+			}
+		}
+		if err := sc.Err(); err != nil {
+			stream.SetError(err)
+		}
+	}()
+
+	return stream, nil
+}
+
+// ---------------------------------------------------------------------------
+// NewStreamingContext — WebSocket, always raw PCM
+// ---------------------------------------------------------------------------
+
+// NewStreamingContext creates a streaming TTS context over Cartesia's WebSocket.
+// Text is sent incrementally via SendText(), audio received via Audio().
+// Always emits raw/pcm_s16le at the configured sample rate.
+func (c *CartesiaProvider) NewStreamingContext(ctx context.Context, opts StreamingContextOptions) (*StreamingContext, error) {
+	if c == nil || strings.TrimSpace(c.apiKey) == "" {
+		return nil, fmt.Errorf("cartesia api key is required")
+	}
+	voiceID := strings.TrimSpace(opts.Voice)
+	if voiceID == "" {
+		return nil, fmt.Errorf("voice id is required")
+	}
+
+	model := strings.TrimSpace(opts.Model)
+	if model == "" {
+		model = cartesiaTTSDefaultModel
+	}
+
+	sampleRate := opts.SampleRate
+	if sampleRate == 0 {
+		sampleRate = 24000
+	}
+
+	maxBufferDelay := opts.MaxBufferDelayMs
+	if maxBufferDelay == 0 {
+		maxBufferDelay = defaultMaxBufferDelayMs
+	}
+
+	// Build WebSocket URL with API key and version as query params.
+	wsURL, err := buildCartesiaWSURL(c.wsBaseURL, c.apiKey)
+	if err != nil {
+		return nil, err
+	}
+
+	// Connect WebSocket.
+	header := http.Header{}
+	header.Set("X-API-Key", c.apiKey)
+	header.Set("Cartesia-Version", cartesiaTTSAPIVersion)
+
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
+	if err != nil {
+		return nil, fmt.Errorf("cartesia ws connect: %w", err)
+	}
+
+	sc := NewStreamingContext()
+	contextID := generateContextID()
+	outputFormat := cartesiaOutputFormat{
+		Container:  "raw",
+		Encoding:   "pcm_s16le",
+		SampleRate: sampleRate,
+	}
+
+	// Track whether we've sent the final chunk.
+	var finalSent atomic.Bool
+
+	// Close coordination.
+	ctxDone := make(chan struct{})
+	var closeOnce sync.Once
+	closeConn := func() error {
+		var closeErr error
+		closeOnce.Do(func() {
+			close(ctxDone)
+			closeErr = conn.Close()
+		})
+		return closeErr
+	}
+
+	// SendFunc: write JSON messages with continue semantics.
+	sc.SendFunc = func(text string, isFinal bool) error {
+		msg := cartesiaStreamingRequest{
+			ModelID:    model,
+			Transcript: text,
+			Voice: cartesiaVoiceSpec{
+				Mode: "id",
+				ID:   voiceID,
+			},
+			OutputFormat:     outputFormat,
+			ContextID:        contextID,
+			Continue:         !isFinal,
+			MaxBufferDelayMs: maxBufferDelay,
+		}
+		if opts.Language != "" {
+			msg.Language = opts.Language
+		}
+
+		if isFinal {
+			finalSent.Store(true)
+		}
+
+		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		return conn.WriteJSON(msg)
+	}
+
+	sc.CloseFunc = closeConn
+
+	// Background goroutine: read WebSocket responses, decode audio, push to channel.
+	go func() {
+		defer sc.FinishAudio()
+		defer closeConn()
+
+		for {
+			select {
+			case <-ctx.Done():
+				sc.SetError(ctx.Err())
+				return
+			case <-ctxDone:
+				return
+			default:
+			}
+
+			_, data, err := conn.ReadMessage()
+			if err != nil {
+				// Normal close paths — don't treat as error.
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					return
+				}
+				// If we initiated close, the read will fail — that's expected.
+				select {
+				case <-ctxDone:
+					return
+				default:
+				}
+				sc.SetError(fmt.Errorf("cartesia ws read: %w", err))
+				return
+			}
+
+			var msg cartesiaWSResponse
+			if err := json.Unmarshal(data, &msg); err != nil {
+				continue
+			}
+
+			switch msg.Type {
+			case "chunk":
+				if msg.Data == "" {
+					continue
+				}
+				audio, err := base64.StdEncoding.DecodeString(msg.Data)
+				if err != nil {
+					sc.SetError(fmt.Errorf("decode audio chunk: %w", err))
+					return
+				}
+				if len(audio) > 0 {
+					if !sc.PushAudio(audio) {
+						return
+					}
+				}
+
+			case "flush_done":
+				// Acknowledgment — continue reading.
+				continue
+
+			case "done":
+				// Only treat as terminal after we've sent the final chunk.
+				// Some Cartesia protocol versions emit intermediate "done"
+				// while the context is still open (continue=true).
+				if finalSent.Load() {
+					return
+				}
+				continue
+
+			case "error":
+				errMsg := msg.Error
+				if errMsg == "" {
+					errMsg = "unknown cartesia error"
+				}
+				sc.SetError(fmt.Errorf("cartesia tts error: %s", errMsg))
+				return
+			}
+		}
+	}()
+
+	return sc, nil
+}
+
+// ---------------------------------------------------------------------------
+// Internal types
+// ---------------------------------------------------------------------------
+
+type cartesiaHTTPRequest struct {
 	ModelID          string                    `json:"model_id"`
 	Transcript       string                    `json:"transcript"`
 	Voice            cartesiaVoiceSpec         `json:"voice"`
-	OutputFormat     cartesiaOutputFormat      `json:"output_format"`
-	Language         *string                   `json:"language,omitempty"`
+	OutputFormat     cartesiaHTTPOutputFormat  `json:"output_format"`
+	Language         string                    `json:"language,omitempty"`
 	GenerationConfig *cartesiaGenerationConfig `json:"generation_config,omitempty"`
+}
+
+type cartesiaStreamingRequest struct {
+	ModelID          string              `json:"model_id"`
+	Transcript       string              `json:"transcript"`
+	Voice            cartesiaVoiceSpec   `json:"voice"`
+	OutputFormat     cartesiaOutputFormat `json:"output_format"`
+	ContextID        string              `json:"context_id"`
+	Continue         bool                `json:"continue"`
+	MaxBufferDelayMs int                 `json:"max_buffer_delay_ms,omitempty"`
+	Language         string              `json:"language,omitempty"`
 }
 
 type cartesiaVoiceSpec struct {
@@ -155,10 +393,18 @@ type cartesiaVoiceSpec struct {
 	ID   string `json:"id"`
 }
 
+// cartesiaOutputFormat is for WebSocket streaming (always raw PCM).
 type cartesiaOutputFormat struct {
 	Container  string `json:"container"`
+	Encoding   string `json:"encoding"`
+	SampleRate int    `json:"sample_rate"`
+}
+
+// cartesiaHTTPOutputFormat supports all container types for HTTP synthesis.
+type cartesiaHTTPOutputFormat struct {
+	Container  string `json:"container"`
 	Encoding   string `json:"encoding,omitempty"`
-	SampleRate int    `json:"sample_rate,omitempty"`
+	SampleRate int    `json:"sample_rate"`
 	BitRate    int    `json:"bit_rate,omitempty"`
 }
 
@@ -168,28 +414,56 @@ type cartesiaGenerationConfig struct {
 	Emotion string  `json:"emotion,omitempty"`
 }
 
-func (c *CartesiaProvider) buildOutputFormat(opts SynthesizeOptions) cartesiaOutputFormat {
+type cartesiaWSResponse struct {
+	Type       string `json:"type"`
+	Data       string `json:"data,omitempty"`
+	Done       bool   `json:"done"`
+	StatusCode int    `json:"status_code"`
+	ContextID  string `json:"context_id,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+func buildCartesiaWSURL(base, apiKey string) (string, error) {
+	if strings.TrimSpace(base) == "" {
+		base = cartesiaTTSWSBase
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", fmt.Errorf("invalid cartesia ws url: %w", err)
+	}
+	q := u.Query()
+	q.Set("cartesia_version", cartesiaTTSAPIVersion)
+	q.Set("api_key", apiKey)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
+func buildHTTPOutputFormat(opts SynthesizeOptions) cartesiaHTTPOutputFormat {
 	sampleRate := opts.SampleRate
 	if sampleRate == 0 {
 		sampleRate = 24000
 	}
 
-	switch opts.Format {
+	format := strings.TrimSpace(strings.ToLower(opts.Format))
+	switch format {
 	case "mp3":
-		bitRate := 128000 // Default 128kbps
-		return cartesiaOutputFormat{
+		return cartesiaHTTPOutputFormat{
 			Container:  "mp3",
 			SampleRate: sampleRate,
-			BitRate:    bitRate,
+			BitRate:    128000,
 		}
 	case "pcm", "raw":
-		return cartesiaOutputFormat{
+		return cartesiaHTTPOutputFormat{
 			Container:  "raw",
 			Encoding:   "pcm_s16le",
 			SampleRate: sampleRate,
 		}
-	default: // wav
-		return cartesiaOutputFormat{
+	default:
+		return cartesiaHTTPOutputFormat{
 			Container:  "wav",
 			Encoding:   "pcm_s16le",
 			SampleRate: sampleRate,
@@ -197,349 +471,8 @@ func (c *CartesiaProvider) buildOutputFormat(opts SynthesizeOptions) cartesiaOut
 	}
 }
 
-func buildStreamingOutputFormat(sampleRate int) cartesiaOutputFormat {
-	if sampleRate == 0 {
-		sampleRate = 24000
-	}
-	// Cartesia WebSocket streaming endpoint currently accepts raw PCM only.
-	return cartesiaOutputFormat{
-		Container:  "raw",
-		Encoding:   "pcm_s16le",
-		SampleRate: sampleRate,
-	}
-}
-
-func getFormat(format string) string {
-	switch format {
-	case "mp3", "pcm", "raw", "wav":
-		return format
-	default:
-		return "wav"
-	}
-}
-
-// SynthesizeStream converts text to streaming audio using Cartesia's WebSocket API.
-func (c *CartesiaProvider) SynthesizeStream(ctx context.Context, text string, opts SynthesizeOptions) (*SynthesisStream, error) {
-	voiceID := opts.Voice
-	if voiceID == "" {
-		voiceID = defaultVoiceID
-	}
-
-	// Build WebSocket URL with query params
-	u, err := url.Parse(cartesiaWSURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse websocket URL: %w", err)
-	}
-	q := u.Query()
-	q.Set("api_key", c.apiKey)
-	q.Set("cartesia_version", cartesiaVersion)
-	u.RawQuery = q.Encode()
-
-	// Connect WebSocket
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("websocket connect: %w", err)
-	}
-
-	// Create stream
-	stream := NewSynthesisStream()
-
-	// Build output format (WebSocket streaming currently requires raw PCM).
-	outputFormat := buildStreamingOutputFormat(opts.SampleRate)
-	modelID := strings.TrimSpace(opts.Model)
-	if modelID == "" {
-		modelID = "sonic-3"
-	}
-
-	// Send generation request
-	wsReq := cartesiaWSRequest{
-		ModelID:    modelID,
-		Transcript: text,
-		Voice: cartesiaVoiceSpec{
-			Mode: "id",
-			ID:   voiceID,
-		},
-		OutputFormat: outputFormat,
-		ContextID:    generateContextID(),
-	}
-
-	if opts.Speed != 0 || opts.Volume != 0 || opts.Emotion != "" {
-		genConfig := &cartesiaGenerationConfig{}
-		if opts.Speed != 0 {
-			genConfig.Speed = opts.Speed
-		}
-		if opts.Volume != 0 {
-			genConfig.Volume = opts.Volume
-		}
-		if opts.Emotion != "" {
-			genConfig.Emotion = opts.Emotion
-		}
-		wsReq.GenerationConfig = genConfig
-	}
-
-	if opts.Language != "" {
-		wsReq.Language = &opts.Language
-	}
-
-	if err := conn.WriteJSON(wsReq); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("send request: %w", err)
-	}
-
-	// Read chunks in background
-	go func() {
-		defer stream.FinishSending()
-		defer conn.Close()
-
-		for {
-			select {
-			case <-ctx.Done():
-				stream.SetError(ctx.Err())
-				return
-			case <-stream.done:
-				return
-			default:
-			}
-
-			var msg cartesiaWSResponse
-			if err := conn.ReadJSON(&msg); err != nil {
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) ||
-					errors.Is(err, net.ErrClosed) ||
-					strings.Contains(err.Error(), "use of closed network connection") {
-					return
-				}
-				stream.SetError(err)
-				return
-			}
-
-			switch msg.Type {
-			case "chunk":
-				// Decode base64 audio data
-				audioData, err := base64.StdEncoding.DecodeString(msg.Data)
-				if err != nil {
-					stream.SetError(fmt.Errorf("decode audio: %w", err))
-					return
-				}
-				if !stream.Send(audioData) {
-					return
-				}
-
-			case "done":
-				return
-
-			case "error":
-				stream.SetError(fmt.Errorf("cartesia error: %s", msg.Error))
-				return
-			}
-		}
-	}()
-
-	return stream, nil
-}
-
-type cartesiaWSRequest struct {
-	ModelID          string                    `json:"model_id"`
-	Transcript       string                    `json:"transcript"`
-	Voice            cartesiaVoiceSpec         `json:"voice"`
-	OutputFormat     cartesiaOutputFormat      `json:"output_format"`
-	GenerationConfig *cartesiaGenerationConfig `json:"generation_config,omitempty"`
-	Language         *string                   `json:"language,omitempty"`
-	ContextID        string                    `json:"context_id,omitempty"`
-}
-
-type cartesiaWSResponse struct {
-	Type       string `json:"type"` // "chunk", "done", "error"
-	Data       string `json:"data,omitempty"`
-	Done       bool   `json:"done,omitempty"`
-	Error      string `json:"error,omitempty"`
-	StatusCode int    `json:"status_code,omitempty"`
-}
-
-var contextCounter atomic.Uint64
-
 func generateContextID() string {
-	return fmt.Sprintf("ctx_%d", contextCounter.Add(1))
-}
-
-// NewStreamingContext creates a streaming context for incremental text-to-speech.
-// Text chunks can be sent via SendText(), and audio chunks are received via Audio().
-func (c *CartesiaProvider) NewStreamingContext(ctx context.Context, opts StreamingContextOptions) (*StreamingContext, error) {
-	voiceID := opts.Voice
-	if voiceID == "" {
-		voiceID = defaultVoiceID
-	}
-
-	// Build WebSocket URL with query params
-	u, err := url.Parse(cartesiaWSURL)
-	if err != nil {
-		return nil, fmt.Errorf("parse websocket URL: %w", err)
-	}
-	q := u.Query()
-	q.Set("api_key", c.apiKey)
-	q.Set("cartesia_version", cartesiaVersion)
-	u.RawQuery = q.Encode()
-
-	// Connect WebSocket
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, u.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("websocket connect: %w", err)
-	}
-
-	// Create streaming context
-	sc := NewStreamingContext()
-	contextID := generateContextID()
-	var finalSent atomic.Bool
-
-	// Build output format from options (WebSocket streaming currently requires raw PCM).
-	outputFormat := buildStreamingOutputFormat(opts.SampleRate)
-
-	// Default buffer delay for good quality with reasonable latency
-	maxBufferDelay := opts.MaxBufferDelayMs
-	if maxBufferDelay == 0 {
-		maxBufferDelay = 500 // 500ms default
-	}
-
-	// Build base request template
-	modelID := strings.TrimSpace(opts.Model)
-	if modelID == "" {
-		modelID = "sonic-3"
-	}
-	baseReq := cartesiaStreamingRequest{
-		ModelID: modelID,
-		Voice: cartesiaVoiceSpec{
-			Mode: "id",
-			ID:   voiceID,
-		},
-		OutputFormat:     outputFormat,
-		ContextID:        contextID,
-		MaxBufferDelayMs: maxBufferDelay,
-	}
-
-	if opts.Speed != 0 || opts.Volume != 0 || opts.Emotion != "" {
-		genConfig := &cartesiaGenerationConfig{}
-		if opts.Speed != 0 {
-			genConfig.Speed = opts.Speed
-		}
-		if opts.Volume != 0 {
-			genConfig.Volume = opts.Volume
-		}
-		if opts.Emotion != "" {
-			genConfig.Emotion = opts.Emotion
-		}
-		baseReq.GenerationConfig = genConfig
-	}
-
-	if opts.Language != "" {
-		baseReq.Language = &opts.Language
-	}
-
-	// Mutex for WebSocket writes
-	var writeMu sync.Mutex
-
-	// SendFunc sends text chunks to WebSocket
-	sc.SendFunc = func(text string, isFinal bool) error {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-
-		if isFinal {
-			finalSent.Store(true)
-		}
-
-		req := baseReq
-		req.Transcript = text
-
-		// Continue=true means more text is coming.
-		// Continue=false tells Cartesia this is the final chunk and closes the context.
-		// We must keep Continue=true until isFinal, otherwise Cartesia closes the context
-		// and rejects subsequent chunks with "Context has closed" error.
-		req.Continue = !isFinal
-
-		if isFinal && text == "" {
-			// No text to send - signal end of stream
-			req.Transcript = ""
-			req.Continue = false
-			return conn.WriteJSON(req)
-		}
-
-		return conn.WriteJSON(req)
-	}
-
-	// CloseFunc closes the WebSocket
-	sc.CloseFunc = func() error {
-		return conn.Close()
-	}
-
-	// Read audio chunks in background
-	go func() {
-		defer sc.FinishAudio()
-		defer conn.Close()
-
-		for {
-			select {
-			case <-ctx.Done():
-				sc.SetError(ctx.Err())
-				return
-			case <-sc.Done():
-				return
-			default:
-			}
-
-			var msg cartesiaWSResponse
-			if err := conn.ReadJSON(&msg); err != nil {
-				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) ||
-					errors.Is(err, net.ErrClosed) ||
-					strings.Contains(err.Error(), "use of closed network connection") {
-					return
-				}
-				sc.SetError(err)
-				return
-			}
-
-			switch msg.Type {
-			case "chunk":
-				// Decode base64 audio data
-				audioData, err := base64.StdEncoding.DecodeString(msg.Data)
-				if err != nil {
-					sc.SetError(fmt.Errorf("decode audio: %w", err))
-					return
-				}
-				if !sc.PushAudio(audioData) {
-					return
-				}
-
-			case "done":
-				// Some Cartesia accounts/protocol versions may emit "done" as a boundary while
-				// the context remains open (continue=true). Only treat "done" as terminal once
-				// we've sent the final chunk (continue=false).
-				if finalSent.Load() {
-					return
-				}
-				continue
-
-			case "flush_done":
-				// Flush acknowledged, continue reading until "done" with all audio
-				continue
-
-			case "error":
-				sc.SetError(fmt.Errorf("cartesia error: %s", msg.Error))
-				return
-			}
-		}
-	}()
-
-	return sc, nil
-}
-
-// cartesiaStreamingRequest is the request format for streaming TTS with continuation.
-type cartesiaStreamingRequest struct {
-	ModelID          string                    `json:"model_id"`
-	Transcript       string                    `json:"transcript"`
-	Voice            cartesiaVoiceSpec         `json:"voice"`
-	OutputFormat     cartesiaOutputFormat      `json:"output_format"`
-	ContextID        string                    `json:"context_id"`
-	Continue         bool                      `json:"continue"`
-	Flush            bool                      `json:"flush,omitempty"`
-	MaxBufferDelayMs int                       `json:"max_buffer_delay_ms,omitempty"`
-	GenerationConfig *cartesiaGenerationConfig `json:"generation_config,omitempty"`
-	Language         *string                   `json:"language,omitempty"`
+	// Use a simple timestamp-based ID. Unique enough for a single WebSocket
+	// connection where context IDs just need to be distinct per session.
+	return fmt.Sprintf("ctx-%d", time.Now().UnixNano())
 }
