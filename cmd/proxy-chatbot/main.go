@@ -21,7 +21,7 @@ const (
 	defaultBaseURL   = "http://127.0.0.1:8080"
 	defaultModel     = "oai-resp/gpt-5-mini"
 	defaultMaxTokens = 512
-	defaultTimeout   = 90 * time.Second
+	defaultTimeout   = 300 * time.Second
 )
 
 const talkToUserSystemInstruction = `You must use the talk_to_user tool for any user-facing speech.
@@ -37,11 +37,14 @@ type chatConfig struct {
 	SystemPrompt  string
 	GatewayAPIKey string
 	ProviderKeys  map[string]string
+	VoiceEnabled  bool
+	VoiceID       string
 }
 
 type streamPrintState struct {
-	sawText bool
-	text    strings.Builder
+	sawText                bool
+	text                   strings.Builder
+	audioUnavailableWarned bool
 
 	toolMetaByIndex         map[int]toolMeta
 	toolLineStartedByIndex  map[int]bool
@@ -74,6 +77,8 @@ func parseChatConfig(args []string, getenv func(string) string) (chatConfig, err
 	fs.DurationVar(&cfg.Timeout, "timeout", defaultTimeout, "per-turn timeout (e.g. 90s)")
 	fs.StringVar(&cfg.SystemPrompt, "system", "", "optional system prompt")
 	fs.StringVar(&cfg.GatewayAPIKey, "gateway-api-key", strings.TrimSpace(getenv("VAI_GATEWAY_API_KEY")), "optional gateway api key (or VAI_GATEWAY_API_KEY)")
+	fs.BoolVar(&cfg.VoiceEnabled, "voice", false, "enable voice output (TTS via gateway)")
+	fs.StringVar(&cfg.VoiceID, "voice-id", "a167e0f3-df7e-4d52-a9c3-f949145efdab", "Cartesia voice ID for TTS")
 
 	if err := fs.Parse(args); err != nil {
 		return chatConfig{}, err
@@ -257,22 +262,136 @@ func buildClientOptions(cfg chatConfig) []vai.ClientOption {
 	return opts
 }
 
-func buildChatTools(_ chatConfig) []vai.ToolWithHandler {
-	type talkToUserInput struct {
-		Content string `json:"content" desc:"Exact text to speak to the user"`
-	}
-	return []vai.ToolWithHandler{
+func buildChatTools(cfg chatConfig) []vai.ToolWithHandler {
+	tools := []vai.ToolWithHandler{
 		vai.VAIWebSearch(vai.Tavily),
 		vai.VAIWebFetch(vai.Tavily),
-		vai.MakeTool("talk_to_user", "Speak text directly to the user via the voice/output channel.", func(ctx context.Context, input talkToUserInput) (string, error) {
-			return "delivered", nil
-		}),
 	}
+	if !cfg.VoiceEnabled {
+		type talkToUserInput struct {
+			Content string `json:"content" desc:"Exact text to speak to the user"`
+		}
+		tools = append(tools, vai.MakeTool("talk_to_user", "Speak text directly to the user via the voice/output channel.", func(ctx context.Context, input talkToUserInput) (string, error) {
+			return "delivered", nil
+		}))
+	}
+	return tools
 }
 
 type chatRuntime struct {
-	currentModel string
-	history      []vai.Message
+	currentModel  string
+	history       []vai.Message
+	recorder      *pcmRecorder // non-nil while recording mic audio
+	pendingPlayer *pcmPlayer   // prewarmed on /st, consumed by next /sp turn only
+}
+
+var (
+	newPCMPlayerFunc    = newPCMPlayer
+	newPCMRecorderFunc  = newPCMRecorder
+	stopPCMRecorderFunc = func(r *pcmRecorder) ([]byte, error) {
+		if r == nil {
+			return nil, nil
+		}
+		return r.Stop()
+	}
+	closePCMPlayerFunc = func(p *pcmPlayer) error {
+		if p == nil {
+			return nil
+		}
+		return p.Close()
+	}
+)
+
+func closePlayerWithDebug(player *pcmPlayer, label string) {
+	if player == nil {
+		return
+	}
+	if err := closePCMPlayerFunc(player); err != nil {
+		if strings.TrimSpace(label) == "" {
+			label = "player.Close"
+		}
+		fmt.Fprintf(os.Stderr, "[debug] %s error: %v\n", label, err)
+	}
+}
+
+func closeAndClearPendingPlayer(state *chatRuntime) {
+	if state == nil || state.pendingPlayer == nil {
+		return
+	}
+	closePlayerWithDebug(state.pendingPlayer, "pending player cleanup")
+	state.pendingPlayer = nil
+}
+
+func consumePendingPlayer(state *chatRuntime) *pcmPlayer {
+	if state == nil {
+		return nil
+	}
+	player := state.pendingPlayer
+	state.pendingPlayer = nil
+	return player
+}
+
+func prewarmPendingPlayer(state *chatRuntime, errOut io.Writer) {
+	if state == nil {
+		return
+	}
+	if errOut == nil {
+		errOut = os.Stderr
+	}
+	closeAndClearPendingPlayer(state)
+	player, err := newPCMPlayerFunc()
+	if err != nil {
+		fmt.Fprintf(errOut, "audio prewarm warning: %v\n", err)
+		return
+	}
+	state.pendingPlayer = player
+	if player.cmd != nil && player.cmd.Process != nil {
+		fmt.Fprintf(os.Stderr, "[debug] prewarmed player created, pid=%d\n", player.cmd.Process.Pid)
+	} else {
+		fmt.Fprintln(os.Stderr, "[debug] prewarmed player created")
+	}
+}
+
+func startRecordingSession(state *chatRuntime, errOut io.Writer) error {
+	if state == nil {
+		return errors.New("chat state must not be nil")
+	}
+	prewarmPendingPlayer(state, errOut)
+	rec, recErr := newPCMRecorderFunc()
+	if recErr != nil {
+		closeAndClearPendingPlayer(state)
+		return recErr
+	}
+	state.recorder = rec
+	return nil
+}
+
+func stopRecordingSession(state *chatRuntime) ([]byte, *pcmPlayer, error) {
+	if state == nil {
+		return nil, nil, errors.New("chat state must not be nil")
+	}
+	if state.recorder == nil {
+		return nil, nil, errors.New("not recording")
+	}
+	prewarmed := consumePendingPlayer(state)
+	audioWAV, stopErr := stopPCMRecorderFunc(state.recorder)
+	state.recorder = nil
+	if stopErr != nil || audioWAV == nil {
+		closePlayerWithDebug(prewarmed, "prewarmed player cleanup")
+		prewarmed = nil
+	}
+	return audioWAV, prewarmed, stopErr
+}
+
+func cleanupAudioState(state *chatRuntime) {
+	if state == nil {
+		return
+	}
+	if state.recorder != nil {
+		_, _ = stopPCMRecorderFunc(state.recorder)
+		state.recorder = nil
+	}
+	closeAndClearPendingPlayer(state)
 }
 
 func handleSlashCommand(line string, state *chatRuntime, cfg chatConfig, out io.Writer, errOut io.Writer) (handled bool, err error) {
@@ -327,8 +446,17 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 	chatTools := buildChatTools(cfg)
 
 	fmt.Fprintf(out, "Proxy chatbot connected to %s using %s\n", cfg.BaseURL, cfg.Model)
-	fmt.Fprintln(out, "Tools enabled: talk_to_user, vai_web_search, vai_web_fetch")
-	fmt.Fprintln(out, "Type /exit or /quit to stop. Use /model to view and /model:{provider}/{model} to switch.")
+	if cfg.VoiceEnabled {
+		fmt.Fprintf(out, "Voice output enabled (voice=%s)\n", cfg.VoiceID)
+		fmt.Fprintln(out, "Tools enabled: vai_web_search, vai_web_fetch")
+	} else {
+		fmt.Fprintln(out, "Tools enabled: talk_to_user, vai_web_search, vai_web_fetch")
+	}
+	if cfg.VoiceEnabled {
+		fmt.Fprintln(out, "Type /exit or /quit to stop. /st to record, /sp to stop & send. /model to view model.")
+	} else {
+		fmt.Fprintln(out, "Type /exit or /quit to stop. Use /model to view and /model:{provider}/{model} to switch.")
+	}
 
 	scanner := bufio.NewScanner(in)
 	state := chatRuntime{
@@ -337,11 +465,16 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 	}
 
 	for {
-		fmt.Fprint(out, "> ")
+		if state.recorder != nil {
+			fmt.Fprint(out, "[rec] > ")
+		} else {
+			fmt.Fprint(out, "> ")
+		}
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
 				return fmt.Errorf("read input: %w", err)
 			}
+			cleanupAudioState(&state)
 			fmt.Fprintln(out)
 			return nil
 		}
@@ -352,8 +485,53 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 		}
 		switch line {
 		case "/exit", "/quit":
+			cleanupAudioState(&state)
 			fmt.Fprintln(out, "bye")
 			return nil
+		}
+
+		// Recording commands (voice mode only).
+		if line == "/st" {
+			if !cfg.VoiceEnabled {
+				fmt.Fprintln(errOut, "voice not enabled (use -voice flag)")
+				continue
+			}
+			if state.recorder != nil {
+				fmt.Fprintln(errOut, "already recording — type /sp to stop")
+				continue
+			}
+			if recErr := startRecordingSession(&state, errOut); recErr != nil {
+				fmt.Fprintf(errOut, "mic error: %v\n", recErr)
+				continue
+			}
+			fmt.Fprintln(out, "Recording... type /sp to stop and send")
+			continue
+		}
+
+		var audioWAV []byte
+		var turnPrewarmedPlayer *pcmPlayer
+		if line == "/sp" {
+			if state.recorder == nil {
+				fmt.Fprintln(errOut, "not recording — type /st to start")
+				continue
+			}
+			var spErr error
+			audioWAV, turnPrewarmedPlayer, spErr = stopRecordingSession(&state)
+			if spErr != nil {
+				fmt.Fprintf(errOut, "recording error: %v\n", spErr)
+				continue
+			}
+			if audioWAV == nil {
+				fmt.Fprintln(errOut, "no audio recorded")
+				continue
+			}
+			fmt.Fprintf(out, "Sending audio (%d bytes)...\n", len(audioWAV))
+		}
+
+		// While recording, ignore non-command input.
+		if state.recorder != nil {
+			fmt.Fprintln(out, "Recording... type /sp to stop")
+			continue
 		}
 
 		if handled, err := handleSlashCommand(line, &state, cfg, out, errOut); err != nil {
@@ -363,9 +541,15 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 		}
 
 		beforeLen := len(state.history)
+		var userContent any
+		if audioWAV != nil {
+			userContent = vai.ContentBlocks(vai.AudioSTT(audioWAV, "audio/wav"))
+		} else {
+			userContent = vai.Text(line)
+		}
 		state.history = append(state.history, vai.Message{
 			Role:    "user",
-			Content: vai.Text(line),
+			Content: userContent,
 		})
 
 		req := &vai.MessageRequest{
@@ -373,19 +557,50 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 			Messages:  state.history,
 			MaxTokens: cfg.MaxTokens,
 		}
-		req.System = composeSystemPrompt(cfg.SystemPrompt)
+		req.System = composeSystemPrompt(cfg.SystemPrompt, cfg.VoiceEnabled)
+		if cfg.VoiceEnabled {
+			req.Voice = vai.VoiceOutput(cfg.VoiceID)
+		}
 
 		turnCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 		stream, err := client.Messages.RunStream(turnCtx, req, vai.WithTools(chatTools...))
 		if err != nil {
 			cancel()
+			closePlayerWithDebug(turnPrewarmedPlayer, "prewarmed player cleanup")
+			turnPrewarmedPlayer = nil
 			state.history = state.history[:beforeLen]
 			fmt.Fprintf(errOut, "run stream setup error: %s\n", vai.FormatError(err))
 			continue
 		}
 
+		var player *pcmPlayer
+		if cfg.VoiceEnabled {
+			if turnPrewarmedPlayer != nil {
+				player = turnPrewarmedPlayer
+				turnPrewarmedPlayer = nil
+				if player.cmd != nil && player.cmd.Process != nil {
+					fmt.Fprintf(os.Stderr, "[debug] using prewarmed player, pid=%d\n", player.cmd.Process.Pid)
+				} else {
+					fmt.Fprintln(os.Stderr, "[debug] using prewarmed player")
+				}
+			} else {
+				var playerErr error
+				player, playerErr = newPCMPlayerFunc()
+				if playerErr != nil {
+					fmt.Fprintf(errOut, "audio player error: %v\n", playerErr)
+				} else {
+					fmt.Fprintf(os.Stderr, "[debug] player created, pid=%d\n", player.cmd.Process.Pid)
+				}
+			}
+		}
+
 		printState := streamPrintState{}
-		processText, processErr := stream.Process(buildStreamCallbacks(out, &printState))
+		processText, processErr := stream.Process(buildStreamCallbacks(out, &printState, player))
+
+		if player != nil {
+			closePlayerWithDebug(player, "player.Close")
+			player = nil
+		}
 		_ = stream.Close()
 
 		if processErr != nil {
@@ -408,7 +623,7 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 	}
 }
 
-func buildStreamCallbacks(out io.Writer, printState *streamPrintState) vai.StreamCallbacks {
+func buildStreamCallbacks(out io.Writer, printState *streamPrintState, player *pcmPlayer) vai.StreamCallbacks {
 	if out == nil {
 		out = os.Stdout
 	}
@@ -417,6 +632,20 @@ func buildStreamCallbacks(out io.Writer, printState *streamPrintState) vai.Strea
 	}
 	initToolStreamState(printState)
 	return vai.StreamCallbacks{
+		OnAudioChunk: func(data []byte, format string) {
+			fmt.Fprintf(os.Stderr, "[debug] OnAudioChunk: %d bytes, format=%q\n", len(data), format)
+			if player != nil {
+				n, writeErr := player.Write(data)
+				if writeErr != nil {
+					fmt.Fprintf(os.Stderr, "[debug] player.Write ERROR: %v\n", writeErr)
+				} else if n != len(data) {
+					fmt.Fprintf(os.Stderr, "[debug] player.Write short: wrote %d of %d bytes\n", n, len(data))
+				}
+			}
+		},
+		OnAudioUnavailable: func(reason, message string) {
+			writeAudioUnavailableWarning(os.Stderr, printState, reason, message)
+		},
 		OnTextDelta: func(text string) {
 			closeOpenToolStreamLine(out, printState)
 			closeOpenTalkStreamLines(out, printState)
@@ -492,6 +721,30 @@ func buildStreamCallbacks(out io.Writer, printState *streamPrintState) vai.Strea
 	}
 }
 
+func writeAudioUnavailableWarning(w io.Writer, state *streamPrintState, reason, message string) {
+	if state != nil && state.audioUnavailableWarned {
+		return
+	}
+	if state != nil {
+		state.audioUnavailableWarned = true
+	}
+	if w == nil {
+		w = os.Stderr
+	}
+	reason = strings.TrimSpace(reason)
+	message = strings.TrimSpace(message)
+	switch {
+	case reason != "" && message != "":
+		fmt.Fprintf(w, "audio unavailable (reason=%s): %s\n", reason, message)
+	case reason != "":
+		fmt.Fprintf(w, "audio unavailable (reason=%s)\n", reason)
+	case message != "":
+		fmt.Fprintf(w, "audio unavailable: %s\n", message)
+	default:
+		fmt.Fprintln(w, "audio unavailable")
+	}
+}
+
 func resolveAssistantDisplay(sawText bool, streamedText string, processText string, result *vai.RunResult) (string, bool) {
 	if sawText {
 		return strings.TrimSpace(streamedText), false
@@ -530,8 +783,13 @@ func syncHistoryFromRunResult(state *chatRuntime, result *vai.RunResult, assista
 	}
 }
 
-func composeSystemPrompt(userPrompt string) string {
+func composeSystemPrompt(userPrompt string, voiceEnabled bool) string {
 	base := strings.TrimSpace(userPrompt)
+	if voiceEnabled {
+		// When voice is enabled, the assistant's streamed text IS the speech.
+		// No talk_to_user tool, no special instruction needed.
+		return base
+	}
 	enforced := strings.TrimSpace(talkToUserSystemInstruction)
 	if base == "" {
 		return enforced

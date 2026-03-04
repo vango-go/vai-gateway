@@ -18,6 +18,17 @@ func TestAudioChunkFrom(t *testing.T) {
 	}
 }
 
+func TestAudioUnavailableFrom(t *testing.T) {
+	event := AudioUnavailableEvent{Reason: "tts_failed", Message: "provider down"}
+	unavailable, ok := AudioUnavailableFrom(event)
+	if !ok {
+		t.Fatalf("expected audio unavailable event")
+	}
+	if unavailable.Reason != "tts_failed" || unavailable.Message != "provider down" {
+		t.Fatalf("unexpected unavailable payload: %#v", unavailable)
+	}
+}
+
 func TestRunStreamProcess_OnAudioChunkCallback(t *testing.T) {
 	events := make(chan RunStreamEvent, 2)
 	events <- AudioChunkEvent{Data: []byte("a1"), Format: "wav"}
@@ -46,6 +57,39 @@ func TestRunStreamProcess_OnAudioChunkCallback(t *testing.T) {
 	}
 	if got != 2 {
 		t.Fatalf("OnAudioChunk calls = %d, want 2", got)
+	}
+}
+
+func TestRunStreamProcess_OnAudioUnavailableCallback(t *testing.T) {
+	events := make(chan RunStreamEvent, 2)
+	events <- AudioUnavailableEvent{Reason: "tts_failed", Message: "provider down"}
+	events <- AudioUnavailableEvent{Reason: "tts_failed", Message: "ignored duplicate for callback count"}
+	close(events)
+
+	done := make(chan struct{})
+	close(done)
+
+	rs := &RunStream{
+		events: events,
+		done:   done,
+	}
+
+	var calls int
+	var reasons []string
+	_, err := rs.Process(StreamCallbacks{
+		OnAudioUnavailable: func(reason, message string) {
+			calls++
+			reasons = append(reasons, reason+"|"+message)
+		},
+	})
+	if err != nil {
+		t.Fatalf("Process() error = %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("OnAudioUnavailable calls = %d, want 2", calls)
+	}
+	if reasons[0] != "tts_failed|provider down" {
+		t.Fatalf("first callback = %q, want %q", reasons[0], "tts_failed|provider down")
 	}
 }
 

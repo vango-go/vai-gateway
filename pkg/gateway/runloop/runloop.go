@@ -13,6 +13,7 @@ import (
 	"github.com/vango-go/vai-lite/pkg/core"
 	"github.com/vango-go/vai-lite/pkg/core/types"
 	"github.com/vango-go/vai-lite/pkg/core/voice"
+	"github.com/vango-go/vai-lite/pkg/core/voice/tts"
 	"github.com/vango-go/vai-lite/pkg/gateway/apierror"
 )
 
@@ -344,14 +345,18 @@ func (c *Controller) streamTurn(ctx context.Context, req *types.MessageRequest, 
 		sampleRate = req.Voice.Output.SampleRate
 	}
 
+	var ttsCtx *tts.StreamingContext
 	var ttsStream *voice.StreamingTTS
 	var audioCh <-chan []byte
+	ttsFedText := false
+	audioStopped := false
+	audioFailed := false
 	if req.Voice != nil && req.Voice.Output != nil {
 		resolvedTTSModel, resolveErr := voice.ResolveTTSModel(req.TTSModel)
 		if resolveErr != nil {
 			return nil, resolveErr
 		}
-		ttsCtx, err := c.VoicePipeline.NewStreamingTTSContext(ctx, req.Voice, resolvedTTSModel.Model)
+		ttsCtx, err = c.VoicePipeline.NewStreamingTTSContext(ctx, req.Voice, resolvedTTSModel.Model)
 		if err != nil {
 			return nil, err
 		}
@@ -361,6 +366,40 @@ func (c *Controller) streamTurn(ctx context.Context, req *types.MessageRequest, 
 
 	emitAudio := func(chunk []byte, isFinal bool) error {
 		return emit(types.AudioChunkEvent{Type: "audio_chunk", Format: "pcm_s16le", Audio: base64.StdEncoding.EncodeToString(chunk), SampleRateHz: sampleRate, IsFinal: isFinal})
+	}
+
+	var pendingAudio []byte
+	flushPendingAudio := func(final bool) error {
+		if audioStopped || len(pendingAudio) == 0 {
+			pendingAudio = nil
+			return nil
+		}
+		chunk := pendingAudio
+		pendingAudio = nil
+		return emitAudio(chunk, final)
+	}
+	handleAudioChunk := func(chunk []byte) error {
+		if len(chunk) == 0 || audioStopped {
+			return nil
+		}
+		if err := flushPendingAudio(false); err != nil {
+			return err
+		}
+		pendingAudio = chunk
+		return nil
+	}
+	emitTTSUnavailable := func(err error) {
+		if err == nil || audioFailed {
+			return
+		}
+		audioFailed = true
+		audioStopped = true
+		pendingAudio = nil
+		_ = emit(types.AudioUnavailableEvent{Type: "audio_unavailable", Reason: "tts_failed", Message: "TTS synthesis failed: " + err.Error()})
+		if ttsCtx != nil {
+			_ = ttsCtx.Close()
+		}
+		ttsStream = nil
 	}
 
 	type next struct {
@@ -407,6 +446,9 @@ func (c *Controller) streamTurn(ctx context.Context, req *types.MessageRequest, 
 		select {
 		case <-ctx.Done():
 			_ = stream.Close()
+			if ttsCtx != nil {
+				_ = ttsCtx.Close()
+			}
 			return nil, ctx.Err()
 		case <-func() <-chan time.Time {
 			if idleTimer == nil {
@@ -415,7 +457,18 @@ func (c *Controller) streamTurn(ctx context.Context, req *types.MessageRequest, 
 			return idleTimer.C
 		}():
 			_ = stream.Close()
+			if ttsCtx != nil {
+				_ = ttsCtx.Close()
+			}
 			return nil, core.NewAPIError("upstream stream idle timeout")
+		case chunk, ok := <-audioCh:
+			if !ok {
+				audioCh = nil
+				continue
+			}
+			if err := handleAudioChunk(chunk); err != nil {
+				return nil, err
+			}
 		case n, ok := <-nextCh:
 			if !ok {
 				goto done
@@ -428,36 +481,17 @@ func (c *Controller) streamTurn(ctx context.Context, req *types.MessageRequest, 
 				if ttsStream != nil {
 					if cbs, ok := n.ev.(types.ContentBlockStartEvent); ok {
 						if tb, ok := cbs.ContentBlock.(types.TextBlock); ok && strings.TrimSpace(tb.Text) != "" {
+							ttsFedText = true
 							if err := ttsStream.OnTextDelta(tb.Text); err != nil {
-								_ = emit(types.AudioUnavailableEvent{Type: "audio_unavailable", Reason: "tts_failed", Message: "TTS synthesis failed: " + err.Error()})
-								ttsStream = nil
+								emitTTSUnavailable(err)
 							}
 						}
 					}
 					if cbd, ok := n.ev.(types.ContentBlockDeltaEvent); ok {
 						if td, ok := cbd.Delta.(types.TextDelta); ok {
+							ttsFedText = true
 							if err := ttsStream.OnTextDelta(td.Text); err != nil {
-								_ = emit(types.AudioUnavailableEvent{Type: "audio_unavailable", Reason: "tts_failed", Message: "TTS synthesis failed: " + err.Error()})
-								ttsStream = nil
-							}
-						}
-					}
-					if ttsStream != nil {
-						for i := 0; i < 2; i++ {
-							select {
-							case chunk, ok := <-audioCh:
-								if !ok {
-									audioCh = nil
-									break
-								}
-								if len(chunk) == 0 {
-									continue
-								}
-								if err := emitAudio(chunk, false); err != nil {
-									return nil, err
-								}
-							default:
-								i = 2
+								emitTTSUnavailable(err)
 							}
 						}
 					}
@@ -474,32 +508,66 @@ func (c *Controller) streamTurn(ctx context.Context, req *types.MessageRequest, 
 	}
 
 done:
-	if ttsStream != nil {
-		if err := ttsStream.Flush(); err != nil {
-			_ = emit(types.AudioUnavailableEvent{Type: "audio_unavailable", Reason: "tts_failed", Message: "TTS synthesis failed: " + err.Error()})
-		}
-		_ = ttsStream.Close()
-
-		var pending []byte
-		for chunk := range audioCh {
-			if len(chunk) == 0 {
-				continue
+	if ttsStream != nil && !audioStopped && ttsFedText {
+		flushErrCh := make(chan error, 1)
+		go func(stream *voice.StreamingTTS) {
+			flushErrCh <- stream.Flush()
+		}(ttsStream)
+		flushDone := false
+		for !flushDone || audioCh != nil {
+			select {
+			case flushErr := <-flushErrCh:
+				flushDone = true
+				if flushErr != nil {
+					emitTTSUnavailable(flushErr)
+				}
+			case chunk, ok := <-audioCh:
+				if !ok {
+					audioCh = nil
+					continue
+				}
+				if err := handleAudioChunk(chunk); err != nil {
+					return nil, err
+				}
+			case <-ctx.Done():
+				if ttsCtx != nil {
+					_ = ttsCtx.Close()
+				}
+				return nil, ctx.Err()
 			}
-			if len(pending) > 0 {
-				if err := emitAudio(pending, false); err != nil {
+		}
+	} else if ttsStream != nil {
+		_ = ttsStream.Close()
+		ttsStream = nil
+	} else if ttsCtx != nil {
+		_ = ttsCtx.Close()
+	}
+
+	if ttsStream != nil && !audioStopped {
+		if err := ttsStream.Err(); err != nil {
+			emitTTSUnavailable(err)
+		}
+	}
+	if ttsStream != nil {
+		_ = ttsStream.Close()
+		ttsStream = nil
+	}
+
+	if audioCh != nil {
+		if audioStopped {
+			for range audioCh {
+			}
+		} else {
+			for chunk := range audioCh {
+				if err := handleAudioChunk(chunk); err != nil {
 					return nil, err
 				}
 			}
-			pending = chunk
 		}
-		if len(pending) > 0 {
-			if err := emitAudio(pending, true); err != nil {
-				return nil, err
-			}
-		}
-
-		if err := ttsStream.Err(); err != nil {
-			_ = emit(types.AudioUnavailableEvent{Type: "audio_unavailable", Reason: "tts_failed", Message: "TTS synthesis failed: " + err.Error()})
+	}
+	if !audioStopped {
+		if err := flushPendingAudio(true); err != nil {
+			return nil, err
 		}
 	}
 

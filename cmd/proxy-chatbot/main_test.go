@@ -252,21 +252,31 @@ func TestBuildChatTools_DefaultNamesAndHandlers(t *testing.T) {
 	if tools[2].Name != "talk_to_user" {
 		t.Fatalf("tools[2].Name=%q, want %q", tools[2].Name, "talk_to_user")
 	}
-	if tools[0].Handler == nil {
-		t.Fatalf("tools[0].Handler is nil")
+	for i, tool := range tools {
+		if tool.Handler == nil {
+			t.Fatalf("tools[%d].Handler is nil", i)
+		}
 	}
-	if tools[1].Handler == nil {
-		t.Fatalf("tools[1].Handler is nil")
+}
+
+func TestBuildChatTools_VoiceMode_ExcludesTalkToUser(t *testing.T) {
+	t.Parallel()
+
+	tools := buildChatTools(chatConfig{VoiceEnabled: true})
+	if len(tools) != 2 {
+		t.Fatalf("len(tools)=%d, want 2", len(tools))
 	}
-	if tools[2].Handler == nil {
-		t.Fatalf("tools[2].Handler is nil")
+	for _, tool := range tools {
+		if tool.Name == "talk_to_user" {
+			t.Fatalf("voice mode should not include talk_to_user tool")
+		}
 	}
 }
 
 func TestComposeSystemPrompt_AppendsTalkInstruction(t *testing.T) {
 	t.Parallel()
 
-	withoutBase := composeSystemPrompt("")
+	withoutBase := composeSystemPrompt("", false)
 	if !strings.Contains(withoutBase, `talk_to_user`) {
 		t.Fatalf("missing talk_to_user instruction in prompt: %q", withoutBase)
 	}
@@ -274,12 +284,21 @@ func TestComposeSystemPrompt_AppendsTalkInstruction(t *testing.T) {
 		t.Fatalf("missing canonical content shape in prompt: %q", withoutBase)
 	}
 
-	withBase := composeSystemPrompt("Be concise.")
+	withBase := composeSystemPrompt("Be concise.", false)
 	if !strings.Contains(withBase, "Be concise.") {
 		t.Fatalf("missing user prompt prefix: %q", withBase)
 	}
 	if !strings.Contains(withBase, talkToUserSystemInstruction) {
 		t.Fatalf("missing enforced talk instruction suffix: %q", withBase)
+	}
+
+	// Voice mode: no talk_to_user instruction
+	voicePrompt := composeSystemPrompt("Be concise.", true)
+	if strings.Contains(voicePrompt, "talk_to_user") {
+		t.Fatalf("voice mode should not include talk_to_user instruction: %q", voicePrompt)
+	}
+	if voicePrompt != "Be concise." {
+		t.Fatalf("voice mode prompt=%q, want %q", voicePrompt, "Be concise.")
 	}
 }
 
@@ -490,7 +509,7 @@ func TestBuildStreamCallbacks_PrintsSingleLineToolStreamAndText(t *testing.T) {
 
 	var out bytes.Buffer
 	state := &streamPrintState{}
-	callbacks := buildStreamCallbacks(&out, state)
+	callbacks := buildStreamCallbacks(&out, state, nil)
 
 	callbacks.OnToolUseStart(2, "", "vai_web_search")
 	callbacks.OnToolInputDelta(2, "", "", `{"query":"recent`)
@@ -525,7 +544,7 @@ func TestBuildStreamCallbacks_ToolStreamNewlineContinuationHasNoPrefix(t *testin
 
 	var out bytes.Buffer
 	state := &streamPrintState{}
-	callbacks := buildStreamCallbacks(&out, state)
+	callbacks := buildStreamCallbacks(&out, state, nil)
 
 	callbacks.OnToolUseStart(1, "", "vai_web_search")
 	callbacks.OnToolInputDelta(1, "", "", "{\"query\":\"line1\nline2\"}")
@@ -545,7 +564,7 @@ func TestBuildStreamCallbacks_ToolStreamInterleavedIndicesStaySeparated(t *testi
 
 	var out bytes.Buffer
 	state := &streamPrintState{}
-	callbacks := buildStreamCallbacks(&out, state)
+	callbacks := buildStreamCallbacks(&out, state, nil)
 
 	callbacks.OnToolUseStart(1, "", "tool_a")
 	callbacks.OnToolUseStart(2, "", "tool_b")
@@ -575,7 +594,7 @@ func TestBuildStreamCallbacks_TextDeltaStartsAfterToolLineTermination(t *testing
 
 	var out bytes.Buffer
 	state := &streamPrintState{}
-	callbacks := buildStreamCallbacks(&out, state)
+	callbacks := buildStreamCallbacks(&out, state, nil)
 
 	callbacks.OnToolUseStart(3, "", "tool_x")
 	callbacks.OnToolInputDelta(3, "", "", "abc")
@@ -592,7 +611,7 @@ func TestBuildStreamCallbacks_TalkToUser_StreamsExtractedSpeechOnly(t *testing.T
 
 	var out bytes.Buffer
 	state := &streamPrintState{}
-	callbacks := buildStreamCallbacks(&out, state)
+	callbacks := buildStreamCallbacks(&out, state, nil)
 
 	callbacks.OnToolUseStart(0, "call_1", "talk_to_user")
 	callbacks.OnToolInputDelta(0, "call_1", "talk_to_user", `{"content":"hel`)
@@ -616,7 +635,7 @@ func TestBuildStreamCallbacks_TalkToUser_NewlineContinuationHasNoPrefix(t *testi
 
 	var out bytes.Buffer
 	state := &streamPrintState{}
-	callbacks := buildStreamCallbacks(&out, state)
+	callbacks := buildStreamCallbacks(&out, state, nil)
 
 	callbacks.OnToolUseStart(0, "", "talk_to_user")
 	callbacks.OnToolInputDelta(0, "", "talk_to_user", `{"content":"line1\nline2"}`)
@@ -636,7 +655,7 @@ func TestBuildStreamCallbacks_TalkToUser_HandlesEscapesAcrossChunks(t *testing.T
 
 	var out bytes.Buffer
 	state := &streamPrintState{}
-	callbacks := buildStreamCallbacks(&out, state)
+	callbacks := buildStreamCallbacks(&out, state, nil)
 
 	callbacks.OnToolUseStart(5, "", "talk_to_user")
 	callbacks.OnToolInputDelta(5, "", "talk_to_user", `{"content":"he\`)
@@ -655,7 +674,7 @@ func TestBuildStreamCallbacks_TalkToUser_LocksFirstDetectedCandidateKey(t *testi
 
 	var out bytes.Buffer
 	state := &streamPrintState{}
-	callbacks := buildStreamCallbacks(&out, state)
+	callbacks := buildStreamCallbacks(&out, state, nil)
 
 	callbacks.OnToolUseStart(9, "call_lock", "talk_to_user")
 	callbacks.OnToolInputDelta(9, "call_lock", "talk_to_user", `{"message":"hel`)
@@ -676,7 +695,7 @@ func TestBuildStreamCallbacks_TalkToUser_HidesExecutionMarker(t *testing.T) {
 
 	var out bytes.Buffer
 	state := &streamPrintState{}
-	callbacks := buildStreamCallbacks(&out, state)
+	callbacks := buildStreamCallbacks(&out, state, nil)
 
 	callbacks.OnToolUseStart(8, "call_talk", "talk_to_user")
 	callbacks.OnToolInputDelta(8, "call_talk", "talk_to_user", `{"content":"hi"}`)
@@ -690,6 +709,32 @@ func TestBuildStreamCallbacks_TalkToUser_HidesExecutionMarker(t *testing.T) {
 	}
 	if !strings.Contains(got, "[tool] vai_web_search") {
 		t.Fatalf("expected non-talk execution marker, got=%q", got)
+	}
+}
+
+func TestWriteAudioUnavailableWarning_EmitsOncePerTurn(t *testing.T) {
+	t.Parallel()
+
+	var errOut bytes.Buffer
+	state := &streamPrintState{}
+
+	writeAudioUnavailableWarning(&errOut, state, "tts_failed", "first failure")
+	writeAudioUnavailableWarning(&errOut, state, "tts_failed", "second failure")
+
+	got := errOut.String()
+	if strings.Count(got, "audio unavailable") != 1 {
+		t.Fatalf("warning count=%d, want 1; output=%q", strings.Count(got, "audio unavailable"), got)
+	}
+	if !strings.Contains(got, "first failure") {
+		t.Fatalf("missing first warning message, output=%q", got)
+	}
+	if strings.Contains(got, "second failure") {
+		t.Fatalf("unexpected second warning message, output=%q", got)
+	}
+
+	writeAudioUnavailableWarning(&errOut, &streamPrintState{}, "tts_failed", "new turn")
+	if strings.Count(errOut.String(), "audio unavailable") != 2 {
+		t.Fatalf("warning count for two turns=%d, want 2; output=%q", strings.Count(errOut.String(), "audio unavailable"), errOut.String())
 	}
 }
 
@@ -886,5 +931,276 @@ func TestFormatError_UnwrapsCauseChain(t *testing.T) {
 	}
 	if !strings.Contains(got, "caused by: root cause") {
 		t.Fatalf("missing root cause line, got=%q", got)
+	}
+}
+
+func withAudioRuntimeHooks(
+	t *testing.T,
+	newPlayer func() (*pcmPlayer, error),
+	newRecorder func() (*pcmRecorder, error),
+	stopRecorder func(*pcmRecorder) ([]byte, error),
+	closePlayer func(*pcmPlayer) error,
+) {
+	t.Helper()
+
+	oldNewPlayer := newPCMPlayerFunc
+	oldNewRecorder := newPCMRecorderFunc
+	oldStopRecorder := stopPCMRecorderFunc
+	oldClosePlayer := closePCMPlayerFunc
+
+	if newPlayer != nil {
+		newPCMPlayerFunc = newPlayer
+	}
+	if newRecorder != nil {
+		newPCMRecorderFunc = newRecorder
+	}
+	if stopRecorder != nil {
+		stopPCMRecorderFunc = stopRecorder
+	}
+	if closePlayer != nil {
+		closePCMPlayerFunc = closePlayer
+	}
+
+	t.Cleanup(func() {
+		newPCMPlayerFunc = oldNewPlayer
+		newPCMRecorderFunc = oldNewRecorder
+		stopPCMRecorderFunc = oldStopRecorder
+		closePCMPlayerFunc = oldClosePlayer
+	})
+}
+
+func TestStartRecordingSession_PrewarmsPlayerAndRecorder(t *testing.T) {
+	player := &pcmPlayer{}
+	rec := &pcmRecorder{}
+
+	withAudioRuntimeHooks(
+		t,
+		func() (*pcmPlayer, error) { return player, nil },
+		func() (*pcmRecorder, error) { return rec, nil },
+		nil,
+		nil,
+	)
+
+	state := &chatRuntime{}
+	var errOut bytes.Buffer
+	if err := startRecordingSession(state, &errOut); err != nil {
+		t.Fatalf("startRecordingSession error: %v", err)
+	}
+	if state.pendingPlayer != player {
+		t.Fatalf("pendingPlayer=%p, want %p", state.pendingPlayer, player)
+	}
+	if state.recorder != rec {
+		t.Fatalf("recorder=%p, want %p", state.recorder, rec)
+	}
+	if errOut.Len() != 0 {
+		t.Fatalf("unexpected stderr output: %q", errOut.String())
+	}
+}
+
+func TestStartRecordingSession_PrewarmFailureStillStartsRecorder(t *testing.T) {
+	rec := &pcmRecorder{}
+
+	withAudioRuntimeHooks(
+		t,
+		func() (*pcmPlayer, error) { return nil, errors.New("no audio output") },
+		func() (*pcmRecorder, error) { return rec, nil },
+		nil,
+		nil,
+	)
+
+	state := &chatRuntime{}
+	var errOut bytes.Buffer
+	if err := startRecordingSession(state, &errOut); err != nil {
+		t.Fatalf("startRecordingSession error: %v", err)
+	}
+	if state.pendingPlayer != nil {
+		t.Fatalf("pendingPlayer=%p, want nil", state.pendingPlayer)
+	}
+	if state.recorder != rec {
+		t.Fatalf("recorder=%p, want %p", state.recorder, rec)
+	}
+	if !strings.Contains(errOut.String(), "audio prewarm warning") {
+		t.Fatalf("expected prewarm warning, got %q", errOut.String())
+	}
+}
+
+func TestStartRecordingSession_RecorderFailureClosesPrewarmedPlayer(t *testing.T) {
+	player := &pcmPlayer{}
+	closeCalls := 0
+
+	withAudioRuntimeHooks(
+		t,
+		func() (*pcmPlayer, error) { return player, nil },
+		func() (*pcmRecorder, error) { return nil, errors.New("mic unavailable") },
+		nil,
+		func(p *pcmPlayer) error {
+			if p == player {
+				closeCalls++
+			}
+			return nil
+		},
+	)
+
+	state := &chatRuntime{}
+	err := startRecordingSession(state, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "mic unavailable") {
+		t.Fatalf("expected mic error, got %v", err)
+	}
+	if state.pendingPlayer != nil {
+		t.Fatalf("pendingPlayer=%p, want nil", state.pendingPlayer)
+	}
+	if state.recorder != nil {
+		t.Fatalf("recorder=%p, want nil", state.recorder)
+	}
+	if closeCalls != 1 {
+		t.Fatalf("closeCalls=%d, want 1", closeCalls)
+	}
+}
+
+func TestStopRecordingSession_ConsumesPrewarmedPlayerOnce(t *testing.T) {
+	player := &pcmPlayer{}
+	state := &chatRuntime{
+		recorder:      &pcmRecorder{},
+		pendingPlayer: player,
+	}
+
+	withAudioRuntimeHooks(
+		t,
+		nil,
+		nil,
+		func(_ *pcmRecorder) ([]byte, error) { return []byte{0x01, 0x02}, nil },
+		func(_ *pcmPlayer) error { return nil },
+	)
+
+	audio, prewarmed, err := stopRecordingSession(state)
+	if err != nil {
+		t.Fatalf("stopRecordingSession error: %v", err)
+	}
+	if len(audio) != 2 {
+		t.Fatalf("len(audio)=%d, want 2", len(audio))
+	}
+	if prewarmed != player {
+		t.Fatalf("prewarmed=%p, want %p", prewarmed, player)
+	}
+	if state.pendingPlayer != nil {
+		t.Fatalf("pendingPlayer=%p, want nil", state.pendingPlayer)
+	}
+	if state.recorder != nil {
+		t.Fatalf("recorder=%p, want nil", state.recorder)
+	}
+}
+
+func TestStopRecordingSession_NoAudioClosesConsumedPrewarmedPlayer(t *testing.T) {
+	player := &pcmPlayer{}
+	closeCalls := 0
+	state := &chatRuntime{
+		recorder:      &pcmRecorder{},
+		pendingPlayer: player,
+	}
+
+	withAudioRuntimeHooks(
+		t,
+		nil,
+		nil,
+		func(_ *pcmRecorder) ([]byte, error) { return nil, nil },
+		func(p *pcmPlayer) error {
+			if p == player {
+				closeCalls++
+			}
+			return nil
+		},
+	)
+
+	audio, prewarmed, err := stopRecordingSession(state)
+	if err != nil {
+		t.Fatalf("stopRecordingSession error: %v", err)
+	}
+	if audio != nil {
+		t.Fatalf("audio=%v, want nil", audio)
+	}
+	if prewarmed != nil {
+		t.Fatalf("prewarmed=%p, want nil", prewarmed)
+	}
+	if closeCalls != 1 {
+		t.Fatalf("closeCalls=%d, want 1", closeCalls)
+	}
+	if state.pendingPlayer != nil {
+		t.Fatalf("pendingPlayer=%p, want nil", state.pendingPlayer)
+	}
+}
+
+func TestStopRecordingSession_ErrorClosesConsumedPrewarmedPlayer(t *testing.T) {
+	player := &pcmPlayer{}
+	closeCalls := 0
+	state := &chatRuntime{
+		recorder:      &pcmRecorder{},
+		pendingPlayer: player,
+	}
+
+	withAudioRuntimeHooks(
+		t,
+		nil,
+		nil,
+		func(_ *pcmRecorder) ([]byte, error) { return nil, errors.New("stop failed") },
+		func(p *pcmPlayer) error {
+			if p == player {
+				closeCalls++
+			}
+			return nil
+		},
+	)
+
+	audio, prewarmed, err := stopRecordingSession(state)
+	if err == nil || !strings.Contains(err.Error(), "stop failed") {
+		t.Fatalf("expected stop error, got %v", err)
+	}
+	if audio != nil {
+		t.Fatalf("audio=%v, want nil", audio)
+	}
+	if prewarmed != nil {
+		t.Fatalf("prewarmed=%p, want nil", prewarmed)
+	}
+	if closeCalls != 1 {
+		t.Fatalf("closeCalls=%d, want 1", closeCalls)
+	}
+}
+
+func TestCleanupAudioState_ClosesPendingPlayerAndStopsRecorder(t *testing.T) {
+	player := &pcmPlayer{}
+	state := &chatRuntime{
+		recorder:      &pcmRecorder{},
+		pendingPlayer: player,
+	}
+	stopCalls := 0
+	closeCalls := 0
+
+	withAudioRuntimeHooks(
+		t,
+		nil,
+		nil,
+		func(_ *pcmRecorder) ([]byte, error) {
+			stopCalls++
+			return nil, nil
+		},
+		func(p *pcmPlayer) error {
+			if p == player {
+				closeCalls++
+			}
+			return nil
+		},
+	)
+
+	cleanupAudioState(state)
+	if stopCalls != 1 {
+		t.Fatalf("stopCalls=%d, want 1", stopCalls)
+	}
+	if closeCalls != 1 {
+		t.Fatalf("closeCalls=%d, want 1", closeCalls)
+	}
+	if state.recorder != nil {
+		t.Fatalf("recorder=%p, want nil", state.recorder)
+	}
+	if state.pendingPlayer != nil {
+		t.Fatalf("pendingPlayer=%p, want nil", state.pendingPlayer)
 	}
 }

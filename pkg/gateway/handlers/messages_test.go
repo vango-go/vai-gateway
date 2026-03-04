@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -570,7 +571,10 @@ func (p *streamErrProvider) StreamMessage(ctx context.Context, req *types.Messag
 }
 
 type fakeStreamingTTSProvider struct {
-	failOnSend bool
+	failOnSend    bool
+	chunksPerSend int
+	chunksOnFinal int
+	chunkPayload  []byte
 }
 
 func (p *fakeStreamingTTSProvider) Name() string { return "fake-tts" }
@@ -585,21 +589,43 @@ func (p *fakeStreamingTTSProvider) SynthesizeStream(ctx context.Context, text st
 
 func (p *fakeStreamingTTSProvider) NewStreamingContext(ctx context.Context, opts tts.StreamingContextOptions) (*tts.StreamingContext, error) {
 	sc := tts.NewStreamingContext()
+	var finished sync.Once
+	chunkPayload := p.chunkPayload
+	if len(chunkPayload) == 0 {
+		chunkPayload = []byte{0x01, 0x02, 0x03}
+	}
+	chunksPerSend := p.chunksPerSend
+	if chunksPerSend <= 0 {
+		chunksPerSend = 1
+	}
 	sc.SendFunc = func(text string, isFinal bool) error {
 		if p.failOnSend && strings.TrimSpace(text) != "" {
 			err := fmt.Errorf("forced tts failure")
 			sc.SetError(err)
+			finished.Do(func() { sc.FinishAudio() })
 			return err
 		}
 		if strings.TrimSpace(text) != "" {
-			if !sc.PushAudio([]byte{0x01, 0x02, 0x03}) {
-				return nil
+			for i := 0; i < chunksPerSend; i++ {
+				if !sc.PushAudio(chunkPayload) {
+					return nil
+				}
 			}
+		}
+		if isFinal {
+			for i := 0; i < p.chunksOnFinal; i++ {
+				if !sc.PushAudio(chunkPayload) {
+					break
+				}
+			}
+			// Simulate Cartesia behavior: after the final chunk, the
+			// provider generates remaining audio and closes the stream.
+			finished.Do(func() { sc.FinishAudio() })
 		}
 		return nil
 	}
 	sc.CloseFunc = func() error {
-		sc.FinishAudio()
+		finished.Do(func() { sc.FinishAudio() })
 		return nil
 	}
 	return sc, nil
@@ -914,6 +940,63 @@ func TestMessagesHandler_Stream_VoiceAudioChunkFormatAndFinalMarker(t *testing.T
 	}
 	if !strings.Contains(body, `"is_final":true`) {
 		t.Fatalf("missing final audio chunk marker: %q", body)
+	}
+	if !strings.Contains(body, "event: message_stop\n") {
+		t.Fatalf("missing message_stop event: %q", body)
+	}
+}
+
+func TestMessagesHandler_Stream_VoiceLongBurst_NoBackpressureTruncation(t *testing.T) {
+	provider := &fakeProvider{
+		streamEvents: []types.StreamEvent{
+			types.MessageStartEvent{
+				Type: "message_start",
+				Message: types.MessageResponse{
+					ID:    "msg_1",
+					Type:  "message",
+					Role:  "assistant",
+					Model: "anthropic/test",
+				},
+			},
+			types.ContentBlockStartEvent{
+				Type:         "content_block_start",
+				Index:        0,
+				ContentBlock: types.TextBlock{Type: "text", Text: ""},
+			},
+			types.ContentBlockDeltaEvent{
+				Type:  "content_block_delta",
+				Index: 0,
+				Delta: types.TextDelta{Type: "text_delta", Text: "Long response body."},
+			},
+			types.ContentBlockStopEvent{Type: "content_block_stop", Index: 0},
+			types.MessageStopEvent{Type: "message_stop"},
+		},
+	}
+
+	voicePipeline := voice.NewPipelineWithProviders(nil, &fakeStreamingTTSProvider{
+		chunksOnFinal: 220,
+		chunkPayload:  []byte{0x09, 0x08, 0x07, 0x06},
+	})
+	h := MessagesHandler{
+		Config: config.Config{
+			SSEMaxStreamDuration: 2 * time.Second,
+			StreamIdleTimeout:    2 * time.Second,
+		},
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	rr := httptest.NewRecorder()
+	h.serveStream(rr, req, req.Context(), "req_test", provider, newVoiceStreamingRequest(), voicePipeline, "")
+
+	body := rr.Body.String()
+	if strings.Count(body, "event: audio_chunk\n") < 150 {
+		t.Fatalf("expected many audio chunks, got %d; body=%q", strings.Count(body, "event: audio_chunk\n"), body)
+	}
+	if strings.Count(body, `"is_final":true`) != 1 {
+		t.Fatalf("expected exactly one final marker, got %d; body=%q", strings.Count(body, `"is_final":true`), body)
+	}
+	if strings.Contains(body, `"reason":"backpressure"`) {
+		t.Fatalf("unexpected backpressure audio_unavailable event: %q", body)
 	}
 	if !strings.Contains(body, "event: message_stop\n") {
 		t.Fatalf("missing message_stop event: %q", body)

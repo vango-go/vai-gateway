@@ -363,7 +363,77 @@ func TestRunStream_VoiceEventsAreTopLevelRunEvents(t *testing.T) {
 	}
 }
 
-type fakeTTSProvider struct{}
+func TestRunStream_VoiceLongBurst_NoBackpressureTruncation(t *testing.T) {
+	delta := types.MessageDeltaEvent{Type: "message_delta"}
+	delta.Delta.StopReason = types.StopReasonEndTurn
+	provider := &scriptedProvider{name: "test", streams: [][]streamItem{{
+		{event: types.MessageStartEvent{Type: "message_start", Message: types.MessageResponse{Type: "message", Role: "assistant", Model: "m"}}},
+		{event: types.ContentBlockStartEvent{Type: "content_block_start", Index: 0, ContentBlock: types.TextBlock{Type: "text", Text: ""}}},
+		{event: types.ContentBlockDeltaEvent{Type: "content_block_delta", Index: 0, Delta: types.TextDelta{Type: "text_delta", Text: "long response body."}}},
+		{event: delta, err: io.EOF},
+	}}}
+
+	pipeline := voice.NewPipelineWithProviders(nil, &fakeTTSProvider{
+		chunksOnFinal: 220,
+		chunkPayload:  []byte{1, 2, 3, 4},
+	})
+	controller := &Controller{
+		Provider:          provider,
+		Tools:             builtins.NewRegistry(fakeExecutor{name: builtins.BuiltinWebSearch}),
+		VoicePipeline:     pipeline,
+		StreamIdleTimeout: 2 * time.Second,
+		PublicModel:       "anthropic/test",
+		RequestID:         "req_1",
+	}
+
+	seen := make([]types.RunStreamEvent, 0, 256)
+	_, err := controller.RunStream(context.Background(), &types.RunRequest{
+		Request: types.MessageRequest{
+			Model:    "m",
+			Messages: []types.Message{{Role: "user", Content: "hi"}},
+			Voice:    &types.VoiceConfig{Output: &types.VoiceOutputConfig{Voice: "v", Format: "pcm"}},
+		},
+		Run: types.RunConfig{MaxTurns: 8, MaxToolCalls: 20, TimeoutMS: 60000, ParallelTools: true, ToolTimeoutMS: 30000},
+	}, func(ev types.RunStreamEvent) error {
+		seen = append(seen, ev)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+
+	audioChunkCount := 0
+	finalChunkCount := 0
+	backpressureUnavailable := false
+	for _, ev := range seen {
+		switch e := ev.(type) {
+		case types.AudioChunkEvent:
+			audioChunkCount++
+			if e.IsFinal {
+				finalChunkCount++
+			}
+		case types.AudioUnavailableEvent:
+			if e.Reason == "backpressure" {
+				backpressureUnavailable = true
+			}
+		}
+	}
+	if audioChunkCount < 150 {
+		t.Fatalf("audio chunk count=%d, want >=150; events=%v", audioChunkCount, seen)
+	}
+	if finalChunkCount != 1 {
+		t.Fatalf("final chunk count=%d, want 1; events=%v", finalChunkCount, seen)
+	}
+	if backpressureUnavailable {
+		t.Fatalf("unexpected backpressure audio_unavailable event: %v", seen)
+	}
+}
+
+type fakeTTSProvider struct {
+	chunksPerSend int
+	chunksOnFinal int
+	chunkPayload  []byte
+}
 
 func (f *fakeTTSProvider) Name() string { return "fake" }
 func (f *fakeTTSProvider) Synthesize(ctx context.Context, text string, opts tts.SynthesizeOptions) (*tts.Synthesis, error) {
@@ -377,11 +447,28 @@ func (f *fakeTTSProvider) SynthesizeStream(ctx context.Context, text string, opt
 }
 func (f *fakeTTSProvider) NewStreamingContext(ctx context.Context, opts tts.StreamingContextOptions) (*tts.StreamingContext, error) {
 	sc := tts.NewStreamingContext()
+	chunksPerSend := f.chunksPerSend
+	if chunksPerSend <= 0 {
+		chunksPerSend = 1
+	}
+	chunkPayload := f.chunkPayload
+	if len(chunkPayload) == 0 {
+		chunkPayload = []byte{1, 2, 3}
+	}
 	sc.SendFunc = func(text string, isFinal bool) error {
 		if strings.TrimSpace(text) != "" {
-			sc.PushAudio([]byte{1, 2, 3})
+			for i := 0; i < chunksPerSend; i++ {
+				if !sc.PushAudio(chunkPayload) {
+					return nil
+				}
+			}
 		}
 		if isFinal {
+			for i := 0; i < f.chunksOnFinal; i++ {
+				if !sc.PushAudio(chunkPayload) {
+					break
+				}
+			}
 			sc.FinishAudio()
 		}
 		return nil

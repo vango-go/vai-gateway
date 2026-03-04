@@ -153,6 +153,9 @@ func (h MessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var userTranscript string
 	needsSTT := types.RequestHasAudioSTT(req)
 	needsTTS := req.Voice != nil && req.Voice.Output != nil
+	if h.Logger != nil {
+		h.Logger.Info("voice check", "needsSTT", needsSTT, "needsTTS", needsTTS, "hasVoice", req.Voice != nil, "hasCartesiaHeader", r.Header.Get("X-Provider-Key-Cartesia") != "")
+	}
 	if needsSTT || needsTTS {
 		cartesiaKey := strings.TrimSpace(r.Header.Get("X-Provider-Key-Cartesia"))
 		if cartesiaKey == "" {
@@ -311,8 +314,9 @@ func (h MessagesHandler) serveStream(
 	var ttsStream *voice.StreamingTTS
 	audioDone := make(chan struct{})
 	audioBytesCh := make(chan []byte, 100)
-	audioUnavailableCh := make(chan types.AudioUnavailableEvent, 1)
 	audioStopped := false
+	audioFailed := false
+	ttsFedText := false
 	sampleRateHz := 24000
 	if req.Voice != nil && req.Voice.Output != nil && req.Voice.Output.SampleRate > 0 {
 		sampleRateHz = req.Voice.Output.SampleRate
@@ -324,11 +328,20 @@ func (h MessagesHandler) serveStream(
 			h.writeErr(w, reqID, resolveErr, true)
 			return
 		}
+		if h.Logger != nil {
+			h.Logger.Info("tts setup", "model", resolvedTTSModel.Model, "voice", req.Voice.Output.Voice)
+		}
 		var err error
 		ttsCtx, err = voicePipeline.NewStreamingTTSContext(ctx, req.Voice, resolvedTTSModel.Model)
 		if err != nil {
+			if h.Logger != nil {
+				h.Logger.Error("tts context failed", "error", err)
+			}
 			h.writeErr(w, reqID, err, true)
 			return
+		}
+		if h.Logger != nil {
+			h.Logger.Info("tts context created")
 		}
 		ttsStream = voice.NewStreamingTTS(ttsCtx, voice.StreamingTTSOptions{BufferAudio: false})
 
@@ -336,26 +349,27 @@ func (h MessagesHandler) serveStream(
 			defer close(audioDone)
 			defer close(audioBytesCh)
 
-			dropped := false
-			for chunk := range ttsStream.Audio() {
-				if len(chunk) == 0 {
-					continue
-				}
-				if dropped {
-					continue
-				}
+			chunks := 0
+			audioStream := ttsStream.Audio()
+			for {
 				select {
-				case audioBytesCh <- chunk:
-				default:
-					dropped = true
-					// Best-effort: disable audio emission for this response.
+				case <-ctx.Done():
+					return
+				case chunk, ok := <-audioStream:
+					if !ok {
+						return
+					}
+					if len(chunk) == 0 {
+						continue
+					}
+					chunks++
+					if chunks == 1 && h.Logger != nil {
+						h.Logger.Info("tts first audio chunk", "bytes", len(chunk))
+					}
 					select {
-					case audioUnavailableCh <- types.AudioUnavailableEvent{
-						Type:    "audio_unavailable",
-						Reason:  "backpressure",
-						Message: "TTS audio backpressure: client is too slow",
-					}:
-					default:
+					case audioBytesCh <- chunk:
+					case <-ctx.Done():
+						return
 					}
 				}
 			}
@@ -430,44 +444,37 @@ func (h MessagesHandler) serveStream(
 		return sendAudioChunk(chunk, final)
 	}
 
-	drainAudioNonBlocking := func(max int) error {
-		if audioStopped || ttsStream == nil {
+	handleAudioChunk := func(chunk []byte) error {
+		if len(chunk) == 0 {
 			return nil
 		}
-		for i := 0; i < max; i++ {
-			select {
-			case unavailable := <-audioUnavailableCh:
-				// Terminal for audio; no more audio chunks should be emitted.
-				audioStopped = true
-				pendingAudio = nil
-				if ttsStream != nil {
-					_ = ttsStream.Close()
-					ttsStream = nil
-				}
-				if ttsCtx != nil {
-					_ = ttsCtx.Close()
-				}
-				if err := send(unavailable.EventType(), unavailable); err != nil {
-					return err
-				}
-				return nil
-			case chunk, ok := <-audioBytesCh:
-				if !ok {
-					return nil
-				}
-				if len(chunk) == 0 {
-					continue
-				}
-				// Emit the previous chunk (non-final) and buffer the new one.
-				if err := flushPendingAudio(false); err != nil {
-					return err
-				}
-				pendingAudio = chunk
-			default:
-				return nil
-			}
+		if audioStopped {
+			return nil
 		}
+		// Emit the previous chunk (non-final) and buffer the new one.
+		if err := flushPendingAudio(false); err != nil {
+			return err
+		}
+		pendingAudio = chunk
 		return nil
+	}
+
+	emitTTSUnavailable := func(err error) {
+		if err == nil || audioFailed {
+			return
+		}
+		audioFailed = true
+		audioStopped = true
+		pendingAudio = nil
+		_ = send("audio_unavailable", types.AudioUnavailableEvent{
+			Type:    "audio_unavailable",
+			Reason:  "tts_failed",
+			Message: "TTS synthesis failed: " + err.Error(),
+		})
+		if ttsCtx != nil {
+			_ = ttsCtx.Close()
+		}
+		ttsStream = nil
 	}
 
 	for {
@@ -490,6 +497,19 @@ func (h MessagesHandler) serveStream(
 			}
 			h.writeErr(w, reqID, core.NewAPIError("upstream stream idle timeout"), true)
 			return
+
+		case chunk, ok := <-audioBytesCh:
+			if !ok {
+				audioBytesCh = nil
+				continue
+			}
+			if err := handleAudioChunk(chunk); err != nil {
+				_ = stream.Close()
+				if ttsCtx != nil {
+					_ = ttsCtx.Close()
+				}
+				return
+			}
 
 		case res, ok := <-nextCh:
 			if !ok {
@@ -517,68 +537,23 @@ func (h MessagesHandler) serveStream(
 				if ttsStream != nil {
 					if cbs, ok := res.ev.(types.ContentBlockStartEvent); ok {
 						if tb, ok := cbs.ContentBlock.(types.TextBlock); ok && strings.TrimSpace(tb.Text) != "" {
+							ttsFedText = true
 							if sendErr := ttsStream.OnTextDelta(tb.Text); sendErr != nil {
-								_ = ttsStream.Close()
-								<-audioDone
-								ttsStream = nil
-								if ttsCtx != nil {
-									_ = ttsCtx.Close()
-								}
-								audioUnavailable := types.AudioUnavailableEvent{
-									Type:    "audio_unavailable",
-									Reason:  "tts_failed",
-									Message: "TTS synthesis failed: " + sendErr.Error(),
-								}
-								audioStopped = true
-								pendingAudio = nil
-								if sendErr := send(audioUnavailable.EventType(), audioUnavailable); sendErr != nil {
-									_ = stream.Close()
-									if ttsCtx != nil {
-										_ = ttsCtx.Close()
-									}
-									return
-								}
+								emitTTSUnavailable(sendErr)
 							}
 						}
 					}
 					if cbd, ok := res.ev.(types.ContentBlockDeltaEvent); ok {
 						if td, ok := cbd.Delta.(types.TextDelta); ok {
+							ttsFedText = true
 							if sendErr := ttsStream.OnTextDelta(td.Text); sendErr != nil {
-								_ = ttsStream.Close()
-								<-audioDone
-								ttsStream = nil
-								if ttsCtx != nil {
-									_ = ttsCtx.Close()
-								}
-								audioUnavailable := types.AudioUnavailableEvent{
-									Type:    "audio_unavailable",
-									Reason:  "tts_failed",
-									Message: "TTS synthesis failed: " + sendErr.Error(),
-								}
-								audioStopped = true
-								pendingAudio = nil
-								if sendErr := send(audioUnavailable.EventType(), audioUnavailable); sendErr != nil {
-									_ = stream.Close()
-									if ttsCtx != nil {
-										_ = ttsCtx.Close()
-									}
-									return
-								}
+								emitTTSUnavailable(sendErr)
 							}
 						}
 					}
 				}
 
 				if sendErr := send(res.ev.EventType(), res.ev); sendErr != nil {
-					_ = stream.Close()
-					if ttsCtx != nil {
-						_ = ttsCtx.Close()
-					}
-					return
-				}
-
-				// After forwarding a provider event, opportunistically drain a few audio chunks.
-				if err := drainAudioNonBlocking(2); err != nil {
 					_ = stream.Close()
 					if ttsCtx != nil {
 						_ = ttsCtx.Close()
@@ -601,62 +576,72 @@ func (h MessagesHandler) serveStream(
 	}
 
 done:
-
-	// If audio already failed due to backpressure, make sure the audio_unavailable event is emitted even if
-	// the provider stream ended before we had another chance to drain the channel.
-	select {
-	case unavailable := <-audioUnavailableCh:
-		audioStopped = true
-		pendingAudio = nil
-		if ttsStream != nil {
-			_ = ttsStream.Close()
-			ttsStream = nil
+	if ttsStream != nil && !audioStopped && ttsFedText {
+		if h.Logger != nil {
+			h.Logger.Info("tts flushing")
 		}
-		if ttsCtx != nil {
-			_ = ttsCtx.Close()
+		flushErrCh := make(chan error, 1)
+		go func(stream *voice.StreamingTTS) {
+			flushErrCh <- stream.Flush()
+		}(ttsStream)
+		flushDone := false
+		for !flushDone || audioBytesCh != nil {
+			select {
+			case flushErr := <-flushErrCh:
+				flushDone = true
+				if flushErr != nil {
+					emitTTSUnavailable(flushErr)
+				}
+			case chunk, ok := <-audioBytesCh:
+				if !ok {
+					audioBytesCh = nil
+					continue
+				}
+				if err := handleAudioChunk(chunk); err != nil {
+					return
+				}
+			case <-ctx.Done():
+				if ttsCtx != nil {
+					_ = ttsCtx.Close()
+				}
+				return
+			}
 		}
-		_ = send(unavailable.EventType(), unavailable)
-	default:
+	} else if ttsStream != nil {
+		// No text was fed (e.g. tool-use only turn) or audio already failed.
+		_ = ttsStream.Close()
+		ttsStream = nil
+	} else if ttsCtx != nil {
+		_ = ttsCtx.Close()
 	}
 
+	<-audioDone
+
 	if ttsStream != nil && !audioStopped {
-		if err := ttsStream.Flush(); err != nil {
-			audioStopped = true
-			pendingAudio = nil
-			_ = send("audio_unavailable", types.AudioUnavailableEvent{
-				Type:    "audio_unavailable",
-				Reason:  "tts_failed",
-				Message: "TTS synthesis failed: " + err.Error(),
-			})
+		if err := ttsStream.Err(); err != nil {
+			emitTTSUnavailable(err)
 		}
+	}
+	if ttsStream != nil {
 		_ = ttsStream.Close()
-		<-audioDone
-		if err := ttsStream.Err(); err != nil && !audioStopped {
-			audioStopped = true
-			pendingAudio = nil
-			_ = send("audio_unavailable", types.AudioUnavailableEvent{
-				Type:    "audio_unavailable",
-				Reason:  "tts_failed",
-				Message: "TTS synthesis failed: " + err.Error(),
-			})
-		}
+		ttsStream = nil
 	}
 
 	// Drain any remaining audio bytes and emit the final chunk marker if applicable.
-	if ttsStream != nil && !audioStopped {
-		for chunk := range audioBytesCh {
-			if len(chunk) == 0 {
-				continue
+	if audioBytesCh != nil {
+		if audioStopped {
+			for range audioBytesCh {
 			}
-			if err := flushPendingAudio(false); err != nil {
-				return
+		} else {
+			for chunk := range audioBytesCh {
+				if err := handleAudioChunk(chunk); err != nil {
+					return
+				}
 			}
-			pendingAudio = chunk
 		}
+	}
+	if !audioStopped {
 		_ = flushPendingAudio(true)
-	} else {
-		for range audioBytesCh {
-		}
 	}
 }
 

@@ -398,8 +398,8 @@ func (s *MessagesService) runLoop(ctx context.Context, req *MessageRequest, cfg 
 				}
 				return nil
 			}(),
-			Extensions:    workingReq.Extensions,
-			Metadata:      workingReq.Metadata,
+			Extensions: workingReq.Extensions,
+			Metadata:   workingReq.Metadata,
 		}
 
 		// Call before hook
@@ -807,6 +807,15 @@ type AudioChunkEvent struct {
 }
 
 func (e AudioChunkEvent) runStreamEventType() string { return "audio_chunk" }
+
+// AudioUnavailableEvent signals that streaming text continues but voice audio
+// is no longer available for the current response.
+type AudioUnavailableEvent struct {
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+}
+
+func (e AudioUnavailableEvent) runStreamEventType() string { return "audio_unavailable" }
 
 // InterruptedEvent signals that the stream was interrupted.
 type InterruptedEvent struct {
@@ -1514,6 +1523,12 @@ func (rs *RunStream) run(ctx context.Context, svc *MessagesService, req *Message
 						return
 					}
 					rs.send(AudioChunkEvent{Data: audioBytes, Format: audioEvent.Format})
+				}
+				if unavailableEvent, ok := event.(types.AudioUnavailableEvent); ok {
+					rs.send(AudioUnavailableEvent{
+						Reason:  unavailableEvent.Reason,
+						Message: unavailableEvent.Message,
+					})
 				}
 
 				// Track partial text content for potential interruption

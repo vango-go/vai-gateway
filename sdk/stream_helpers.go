@@ -11,9 +11,10 @@ import (
 // All callbacks are optional - nil callbacks are skipped.
 type StreamCallbacks struct {
 	// Content deltas
-	OnTextDelta     func(text string)     // Text content as it streams
-	OnThinkingDelta func(thinking string) // Claude's reasoning process (extended thinking)
-	OnAudioChunk    func(data []byte, format string)
+	OnTextDelta        func(text string)     // Text content as it streams
+	OnThinkingDelta    func(thinking string) // Claude's reasoning process (extended thinking)
+	OnAudioChunk       func(data []byte, format string)
+	OnAudioUnavailable func(reason, message string)
 
 	// Tool-use stream lifecycle (model content_block_* events).
 	OnToolUseStart   func(index int, id, name string)
@@ -65,6 +66,12 @@ func ThinkingDeltaFrom(event RunStreamEvent) (string, bool) {
 func AudioChunkFrom(event RunStreamEvent) (AudioChunkEvent, bool) {
 	audio, ok := event.(AudioChunkEvent)
 	return audio, ok
+}
+
+// AudioUnavailableFrom extracts top-level audio-unavailable run events.
+func AudioUnavailableFrom(event RunStreamEvent) (AudioUnavailableEvent, bool) {
+	unavailable, ok := event.(AudioUnavailableEvent)
+	return unavailable, ok
 }
 
 // ToolUseStartFrom extracts tool-use start metadata from wrapped stream events.
@@ -134,6 +141,11 @@ func (rs *RunStream) Process(callbacks StreamCallbacks) (string, error) {
 		case AudioChunkEvent:
 			if callbacks.OnAudioChunk != nil {
 				callbacks.OnAudioChunk(e.Data, e.Format)
+			}
+
+		case AudioUnavailableEvent:
+			if callbacks.OnAudioUnavailable != nil {
+				callbacks.OnAudioUnavailable(e.Reason, e.Message)
 			}
 
 		case StepStartEvent:

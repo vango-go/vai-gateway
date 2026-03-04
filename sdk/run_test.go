@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -464,6 +465,7 @@ func TestRunStreamEvents(t *testing.T) {
 		StepStartEvent{Index: 0},
 		StreamEventWrapper{Event: types.PingEvent{}},
 		AudioChunkEvent{Data: []byte("chunk"), Format: "wav"},
+		AudioUnavailableEvent{Reason: "tts_failed", Message: "provider down"},
 		ToolCallStartEvent{ID: "call_1", Name: "test", Input: nil},
 		ToolResultEvent{ID: "call_1", Name: "test", Content: nil},
 		StepCompleteEvent{Index: 0, Response: nil},
@@ -475,6 +477,7 @@ func TestRunStreamEvents(t *testing.T) {
 		"step_start",
 		"stream_event",
 		"audio_chunk",
+		"audio_unavailable",
 		"tool_call_start",
 		"tool_result",
 		"step_complete",
@@ -486,6 +489,81 @@ func TestRunStreamEvents(t *testing.T) {
 		if e.runStreamEventType() != expectedTypes[i] {
 			t.Errorf("Event %d type = %q, want %q", i, e.runStreamEventType(), expectedTypes[i])
 		}
+	}
+}
+
+func TestRunStream_EmitsTopLevelAudioUnavailableEvent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	provider := newScriptedProvider("test", []types.StreamEvent{
+		types.MessageStartEvent{
+			Type: "message_start",
+			Message: types.MessageResponse{
+				Type:  "message",
+				Role:  "assistant",
+				Model: "test-model",
+			},
+		},
+		types.ContentBlockStartEvent{
+			Type:         "content_block_start",
+			Index:        0,
+			ContentBlock: types.TextBlock{Type: "text", Text: ""},
+		},
+		types.ContentBlockDeltaEvent{
+			Type:  "content_block_delta",
+			Index: 0,
+			Delta: types.TextDelta{Type: "text_delta", Text: "hello"},
+		},
+		types.AudioUnavailableEvent{
+			Type:    "audio_unavailable",
+			Reason:  "tts_failed",
+			Message: "provider down",
+		},
+		types.ContentBlockStopEvent{Type: "content_block_stop", Index: 0},
+		func() types.StreamEvent {
+			delta := types.MessageDeltaEvent{Type: "message_delta"}
+			delta.Delta.StopReason = types.StopReasonEndTurn
+			return delta
+		}(),
+		types.MessageStopEvent{Type: "message_stop"},
+	})
+	svc := newMessagesServiceForRunStreamTest(provider)
+
+	stream, err := svc.RunStream(ctx, &MessageRequest{
+		Model:    "test/model",
+		Messages: []Message{{Role: "user", Content: Text("hi")}},
+	})
+	if err != nil {
+		t.Fatalf("RunStream() error = %v", err)
+	}
+
+	sawWrapped := false
+	sawTopLevel := false
+	var topReason, topMessage string
+	for event := range stream.Events() {
+		switch e := event.(type) {
+		case StreamEventWrapper:
+			if _, ok := e.Event.(types.AudioUnavailableEvent); ok {
+				sawWrapped = true
+			}
+		case AudioUnavailableEvent:
+			sawTopLevel = true
+			topReason = e.Reason
+			topMessage = e.Message
+		}
+	}
+	if err := stream.Err(); err != nil && !errors.Is(err, io.EOF) {
+		t.Fatalf("stream.Err() = %v, want nil or EOF", err)
+	}
+	if !sawWrapped {
+		t.Fatalf("expected wrapped audio_unavailable stream event")
+	}
+	if !sawTopLevel {
+		t.Fatalf("expected top-level AudioUnavailableEvent")
+	}
+	if topReason != "tts_failed" || topMessage != "provider down" {
+		t.Fatalf("top-level payload=(%q,%q), want (%q,%q)", topReason, topMessage, "tts_failed", "provider down")
 	}
 }
 
