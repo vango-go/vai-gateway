@@ -6,8 +6,7 @@ import (
 	"github.com/vango-go/vai-lite/pkg/core"
 	"github.com/vango-go/vai-lite/pkg/core/providers/anthropic"
 	"github.com/vango-go/vai-lite/pkg/core/providers/cerebras"
-	"github.com/vango-go/vai-lite/pkg/core/providers/gemini"
-	"github.com/vango-go/vai-lite/pkg/core/providers/gemini_oauth"
+	"github.com/vango-go/vai-lite/pkg/core/providers/gem"
 	"github.com/vango-go/vai-lite/pkg/core/providers/groq"
 	"github.com/vango-go/vai-lite/pkg/core/providers/oai_resp"
 	"github.com/vango-go/vai-lite/pkg/core/providers/openai"
@@ -255,32 +254,32 @@ func (a *openrouterAdapter) Capabilities() core.ProviderCapabilities {
 	}
 }
 
-// geminiAdapter wraps the gemini.Provider to implement core.Provider.
-type geminiAdapter struct {
-	provider *gemini.Provider
+// gemAdapter wraps the gem.Provider to implement core.Provider.
+type gemAdapter struct {
+	provider *gem.Provider
 }
 
-func newGeminiAdapter(p *gemini.Provider) *geminiAdapter {
-	return &geminiAdapter{provider: p}
+func newGemAdapter(p *gem.Provider) *gemAdapter {
+	return &gemAdapter{provider: p}
 }
 
-func (a *geminiAdapter) Name() string {
+func (a *gemAdapter) Name() string {
 	return a.provider.Name()
 }
 
-func (a *geminiAdapter) CreateMessage(ctx context.Context, req *types.MessageRequest) (*types.MessageResponse, error) {
+func (a *gemAdapter) CreateMessage(ctx context.Context, req *types.MessageRequest) (*types.MessageResponse, error) {
 	return a.provider.CreateMessage(ctx, req)
 }
 
-func (a *geminiAdapter) StreamMessage(ctx context.Context, req *types.MessageRequest) (core.EventStream, error) {
+func (a *gemAdapter) StreamMessage(ctx context.Context, req *types.MessageRequest) (core.EventStream, error) {
 	stream, err := a.provider.StreamMessage(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	return &geminiEventStreamAdapter{stream: stream}, nil
+	return &gemEventStreamAdapter{stream: stream}, nil
 }
 
-func (a *geminiAdapter) Capabilities() core.ProviderCapabilities {
+func (a *gemAdapter) Capabilities() core.ProviderCapabilities {
 	caps := a.provider.Capabilities()
 	return core.ProviderCapabilities{
 		Vision:           caps.Vision,
@@ -360,16 +359,16 @@ func (a *openrouterEventStreamAdapter) Close() error {
 	return a.stream.Close()
 }
 
-// geminiEventStreamAdapter wraps gemini.EventStream to implement core.EventStream.
-type geminiEventStreamAdapter struct {
-	stream gemini.EventStream
+// gemEventStreamAdapter wraps gem.EventStream to implement core.EventStream.
+type gemEventStreamAdapter struct {
+	stream gem.EventStream
 }
 
-func (a *geminiEventStreamAdapter) Next() (types.StreamEvent, error) {
+func (a *gemEventStreamAdapter) Next() (types.StreamEvent, error) {
 	return a.stream.Next()
 }
 
-func (a *geminiEventStreamAdapter) Close() error {
+func (a *gemEventStreamAdapter) Close() error {
 	return a.stream.Close()
 }
 
@@ -383,58 +382,5 @@ func (a *oaiRespEventStreamAdapter) Next() (types.StreamEvent, error) {
 }
 
 func (a *oaiRespEventStreamAdapter) Close() error {
-	return a.stream.Close()
-}
-
-// geminiOAuthAdapter wraps the gemini_oauth.Provider to implement core.Provider.
-type geminiOAuthAdapter struct {
-	provider *gemini_oauth.Provider
-}
-
-func newGeminiOAuthAdapter(p *gemini_oauth.Provider) *geminiOAuthAdapter {
-	return &geminiOAuthAdapter{provider: p}
-}
-
-func (a *geminiOAuthAdapter) Name() string {
-	return a.provider.Name()
-}
-
-func (a *geminiOAuthAdapter) CreateMessage(ctx context.Context, req *types.MessageRequest) (*types.MessageResponse, error) {
-	return a.provider.CreateMessage(ctx, req)
-}
-
-func (a *geminiOAuthAdapter) StreamMessage(ctx context.Context, req *types.MessageRequest) (core.EventStream, error) {
-	stream, err := a.provider.StreamMessage(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-	return &geminiOAuthEventStreamAdapter{stream: stream}, nil
-}
-
-func (a *geminiOAuthAdapter) Capabilities() core.ProviderCapabilities {
-	caps := a.provider.Capabilities()
-	return core.ProviderCapabilities{
-		Vision:           caps.Vision,
-		AudioInput:       caps.AudioInput,
-		AudioOutput:      caps.AudioOutput,
-		Video:            caps.Video,
-		Tools:            caps.Tools,
-		ToolStreaming:    caps.ToolStreaming,
-		Thinking:         caps.Thinking,
-		StructuredOutput: caps.StructuredOutput,
-		NativeTools:      caps.NativeTools,
-	}
-}
-
-// geminiOAuthEventStreamAdapter wraps gemini_oauth.EventStream to implement core.EventStream.
-type geminiOAuthEventStreamAdapter struct {
-	stream gemini_oauth.EventStream
-}
-
-func (a *geminiOAuthEventStreamAdapter) Next() (types.StreamEvent, error) {
-	return a.stream.Next()
-}
-
-func (a *geminiOAuthEventStreamAdapter) Close() error {
 	return a.stream.Close()
 }

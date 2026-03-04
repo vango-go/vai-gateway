@@ -14,8 +14,7 @@ import (
 	"github.com/vango-go/vai-lite/pkg/core"
 	"github.com/vango-go/vai-lite/pkg/core/providers/anthropic"
 	"github.com/vango-go/vai-lite/pkg/core/providers/cerebras"
-	"github.com/vango-go/vai-lite/pkg/core/providers/gemini"
-	"github.com/vango-go/vai-lite/pkg/core/providers/gemini_oauth"
+	"github.com/vango-go/vai-lite/pkg/core/providers/gem"
 	"github.com/vango-go/vai-lite/pkg/core/providers/groq"
 	"github.com/vango-go/vai-lite/pkg/core/providers/oai_resp"
 	"github.com/vango-go/vai-lite/pkg/core/providers/openai"
@@ -99,25 +98,25 @@ func (c *Client) initProviders() {
 		c.core.RegisterProvider(newOpenRouterAdapter(openrouter.New(key, openrouter.WithHTTPClient(c.httpClient))))
 	}
 
-	// Gemini OAuth (optional; uses ~/.config/vango/gemini-oauth-credentials.json)
-	var geminiOAuthOpts []gemini_oauth.Option
-	geminiOAuthOpts = append(geminiOAuthOpts, gemini_oauth.WithHTTPClient(c.httpClient))
-	if projectID := os.Getenv("GEMINI_OAUTH_PROJECT_ID"); projectID != "" {
-		geminiOAuthOpts = append(geminiOAuthOpts, gemini_oauth.WithProjectID(projectID))
+	// Gemini Developer API backend (gem-dev)
+	gemDevKey := c.core.GetAPIKey("gem-dev")
+	if gemDevKey == "" {
+		gemDevKey = os.Getenv("GEMINI_API_KEY")
 	}
-	if provider, err := gemini_oauth.New(geminiOAuthOpts...); err == nil {
-		c.core.RegisterProvider(newGeminiOAuthAdapter(provider))
-	} else {
-		c.logger.Debug("gemini-oauth provider not initialized", "error", err)
+	if gemDevKey == "" {
+		gemDevKey = os.Getenv("GOOGLE_API_KEY")
+	}
+	if gemDevKey != "" {
+		c.core.RegisterProvider(newGemAdapter(gem.NewDeveloper(gemDevKey, gem.WithHTTPClient(c.httpClient))))
 	}
 
-	// Gemini API key (also supports GOOGLE_API_KEY)
-	geminiKey := c.core.GetAPIKey("gemini")
-	if geminiKey == "" {
-		geminiKey = os.Getenv("GOOGLE_API_KEY")
+	// Gemini Vertex backend (gem-vert)
+	gemVertKey := c.core.GetAPIKey("gem-vert")
+	if gemVertKey == "" {
+		gemVertKey = os.Getenv("VERTEXAI_API_KEY")
 	}
-	if geminiKey != "" {
-		c.core.RegisterProvider(newGeminiAdapter(gemini.New(geminiKey, gemini.WithHTTPClient(c.httpClient))))
+	if gemVertKey != "" {
+		c.core.RegisterProvider(newGemAdapter(gem.NewVertex(gemVertKey, gem.WithHTTPClient(c.httpClient))))
 	}
 }
 

@@ -76,7 +76,8 @@ import (
 
 func main() {
 	// Direct mode reads provider keys from env:
-	//   ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, GEMINI_API_KEY, etc.
+	//   ANTHROPIC_API_KEY, OPENAI_API_KEY, GROQ_API_KEY,
+	//   GEMINI_API_KEY (gem-dev, GOOGLE_API_KEY fallback), VERTEXAI_API_KEY (gem-vert), etc.
 	client := vai.NewClient()
 
 	stream, err := client.Messages.RunStream(context.Background(), &vai.MessageRequest{
@@ -162,7 +163,8 @@ Notes:
   - `GROQ_API_KEY`
   - `CEREBRAS_API_KEY`
   - `OPENROUTER_API_KEY`
-  - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`)
+  - `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) for `gem-dev/*`
+  - `VERTEXAI_API_KEY` for `gem-vert/*`
 - `TAVILY_API_KEY` is required; the chatbot enables gateway-native `vai_web_search` and `vai_web_fetch` tools via Tavily.
 - Text mode uses `Messages.RunStream()` (client-side loop), not `Runs.Stream()`.
 - Text mode web tools are gateway-native function tools invoked by the SDK loop and executed by the gateway (`/v1/server-tools:execute`), so they work across model providers and after `/model` switches.

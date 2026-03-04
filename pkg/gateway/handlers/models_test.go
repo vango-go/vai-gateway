@@ -62,7 +62,7 @@ func TestModelsHandler_AllowlistFiltersAndSynthesizesUnknown(t *testing.T) {
 	h := ModelsHandler{Config: config.Config{
 		ModelAllowlist: map[string]struct{}{
 			"openai/gpt-4o":           {},
-			"gemini-oauth/gemini-2.5": {},
+			"gem-dev/gemini-2.5":      {},
 			"unknown/custom-123":      {},
 		},
 	}}
@@ -102,13 +102,13 @@ func TestModelsHandler_AllowlistFiltersAndSynthesizesUnknown(t *testing.T) {
 		t.Fatalf("known model auth missing: %#v", known)
 	}
 
-	geminiOAuth := modelByID["gemini-oauth/gemini-2.5"]
-	if geminiOAuth == nil {
-		t.Fatalf("missing synthesized gemini-oauth allowlist model")
+	gemDev := modelByID["gem-dev/gemini-2.5"]
+	if gemDev == nil {
+		t.Fatalf("missing synthesized gem-dev allowlist model")
 	}
-	geminiAuth, ok := geminiOAuth["auth"].(map[string]any)
+	geminiAuth, ok := gemDev["auth"].(map[string]any)
 	if !ok {
-		t.Fatalf("gemini-oauth model auth missing: %#v", geminiOAuth)
+		t.Fatalf("gem-dev model auth missing: %#v", gemDev)
 	}
 	if geminiAuth["requires_byok_header"] != "X-Provider-Key-Gemini" {
 		t.Fatalf("requires_byok_header=%v, want X-Provider-Key-Gemini", geminiAuth["requires_byok_header"])

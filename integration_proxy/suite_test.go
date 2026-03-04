@@ -82,7 +82,8 @@ func TestMain(m *testing.M) {
 	testClient = vai.NewClient(
 		vai.WithBaseURL(gatewayBaseURL),
 		vai.WithProviderKey("openai", os.Getenv("OPENAI_API_KEY")),
-		vai.WithProviderKey("gemini", os.Getenv("GEMINI_API_KEY")),
+		vai.WithProviderKey("gem-dev", getenvDefault("GEMINI_API_KEY", getenvDefault("GOOGLE_API_KEY", ""))),
+		vai.WithProviderKey("gem-vert", os.Getenv("VERTEXAI_API_KEY")),
 		vai.WithProviderKey("openrouter", os.Getenv("OPENROUTER_API_KEY")),
 	)
 	testCtx = context.Background()
@@ -100,10 +101,17 @@ func requireOpenAIKey(t *testing.T) {
 	}
 }
 
-func requireGeminiKey(t *testing.T) {
+func requireGemDevKey(t *testing.T) {
 	t.Helper()
-	if strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) == "" {
-		t.Skip("GEMINI_API_KEY not set")
+	if strings.TrimSpace(os.Getenv("GEMINI_API_KEY")) == "" && strings.TrimSpace(os.Getenv("GOOGLE_API_KEY")) == "" {
+		t.Skip("GEMINI_API_KEY (or GOOGLE_API_KEY fallback) not set")
+	}
+}
+
+func requireGemVertKey(t *testing.T) {
+	t.Helper()
+	if strings.TrimSpace(os.Getenv("VERTEXAI_API_KEY")) == "" {
+		t.Skip("VERTEXAI_API_KEY not set")
 	}
 }
 
@@ -125,10 +133,16 @@ func selectedProxyProviders(t *testing.T) []proxyProviderConfig {
 			RequireKey:   requireOpenAIKey,
 		},
 		{
-			Name:         "gemini",
-			DefaultModel: "gemini/gemini-3-flash-preview",
-			ModelEnv:     "VAI_INTEGRATION_GEMINI_MODEL",
-			RequireKey:   requireGeminiKey,
+			Name:         "gem-dev",
+			DefaultModel: "gem-dev/gemini-2.5-flash",
+			ModelEnv:     "VAI_INTEGRATION_GEM_DEV_MODEL",
+			RequireKey:   requireGemDevKey,
+		},
+		{
+			Name:         "gem-vert",
+			DefaultModel: "gem-vert/gemini-3-flash-preview",
+			ModelEnv:     "VAI_INTEGRATION_GEM_VERT_MODEL",
+			RequireKey:   requireGemVertKey,
 		},
 		{
 			Name:         "openrouter",
@@ -144,12 +158,14 @@ func selectedProxyProviders(t *testing.T) []proxyProviderConfig {
 		return all
 	case "oai-resp", "oairesp", "oai", "openai":
 		return all[:1]
-	case "gemini":
+	case "gem-dev", "gemdev":
 		return []proxyProviderConfig{all[1]}
-	case "openrouter":
+	case "gem-vert", "gemvert":
 		return []proxyProviderConfig{all[2]}
+	case "openrouter":
+		return []proxyProviderConfig{all[3]}
 	default:
-		t.Fatalf("unsupported VAI_INTEGRATION_PROXY_PROVIDER=%q (expected all|oai-resp|gemini|openrouter)", filter)
+		t.Fatalf("unsupported VAI_INTEGRATION_PROXY_PROVIDER=%q (expected all|oai-resp|gem-dev|gem-vert|openrouter)", filter)
 		return nil
 	}
 }

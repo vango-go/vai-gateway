@@ -112,6 +112,114 @@ func TestRunStream_EmitsAudioChunkEventAndAppendsFinalAudio(t *testing.T) {
 	}
 }
 
+func TestRunStream_VoiceWithoutTextDeltas_DoesNotFail(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	delta := types.MessageDeltaEvent{Type: "message_delta"}
+	delta.Delta.StopReason = types.StopReasonEndTurn
+	provider := newScriptedProvider("test", []types.StreamEvent{
+		types.MessageStartEvent{
+			Type: "message_start",
+			Message: types.MessageResponse{
+				Type:  "message",
+				Role:  "assistant",
+				Model: "fake-model",
+			},
+		},
+		delta,
+		types.MessageStopEvent{Type: "message_stop"},
+	})
+	svc := newMessagesServiceForRunStreamTest(provider)
+	attachVoicePipelineForSDKTests(svc, &fakeSDKSTTProvider{}, &fakeSDKTTSProvider{failOnEmptyFinal: true})
+
+	stream, err := svc.RunStream(ctx, &MessageRequest{
+		Model:    "test/model",
+		Messages: []Message{{Role: "user", Content: Text("hello")}},
+		Voice:    VoiceOutput("voice-id", WithAudioFormat(AudioFormatWAV)),
+	})
+	if err != nil {
+		t.Fatalf("RunStream() error = %v", err)
+	}
+	defer stream.Close()
+
+	for range stream.Events() {
+	}
+
+	if err := stream.Err(); err != nil {
+		t.Fatalf("stream.Err() = %v", err)
+	}
+	result := stream.Result()
+	if result == nil || result.Response == nil {
+		t.Fatalf("expected non-nil run result and response")
+	}
+	if result.Response.AudioContent() != nil {
+		t.Fatalf("expected no audio block when no spoken text was produced")
+	}
+}
+
+func TestRunStream_VoiceFallsBackToFinalResponseText(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	delta := types.MessageDeltaEvent{Type: "message_delta"}
+	delta.Delta.StopReason = types.StopReasonEndTurn
+	provider := newScriptedProvider("test", []types.StreamEvent{
+		types.MessageStartEvent{
+			Type: "message_start",
+			Message: types.MessageResponse{
+				Type:  "message",
+				Role:  "assistant",
+				Model: "fake-model",
+			},
+		},
+		types.ContentBlockStartEvent{
+			Type:         "content_block_start",
+			Index:        0,
+			ContentBlock: types.TextBlock{Type: "text", Text: "final answer from block start"},
+		},
+		types.ContentBlockStopEvent{
+			Type:  "content_block_stop",
+			Index: 0,
+		},
+		delta,
+		types.MessageStopEvent{Type: "message_stop"},
+	})
+	svc := newMessagesServiceForRunStreamTest(provider)
+	fakeTTS := &fakeSDKTTSProvider{failOnEmptyFinal: true}
+	attachVoicePipelineForSDKTests(svc, &fakeSDKSTTProvider{}, fakeTTS)
+
+	stream, err := svc.RunStream(ctx, &MessageRequest{
+		Model:    "test/model",
+		Messages: []Message{{Role: "user", Content: Text("hello")}},
+		Voice:    VoiceOutput("voice-id", WithAudioFormat(AudioFormatWAV)),
+	})
+	if err != nil {
+		t.Fatalf("RunStream() error = %v", err)
+	}
+	defer stream.Close()
+
+	for range stream.Events() {
+	}
+
+	if err := stream.Err(); err != nil {
+		t.Fatalf("stream.Err() = %v", err)
+	}
+	result := stream.Result()
+	if result == nil || result.Response == nil {
+		t.Fatalf("expected non-nil run result and response")
+	}
+	if result.Response.AudioContent() == nil {
+		t.Fatalf("expected audio block from final response text fallback")
+	}
+	fakeTTS.mu.Lock()
+	streamedCount := len(fakeTTS.streamedTexts)
+	fakeTTS.mu.Unlock()
+	if streamedCount == 0 {
+		t.Fatalf("expected TTS streamed text calls")
+	}
+}
+
 func TestRunStream_VoiceRequestedWithoutPipelineErrors(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

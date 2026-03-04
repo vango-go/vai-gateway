@@ -8,11 +8,13 @@ It is intentionally detailed and opinionated so we can:
 - support `Run` / `RunStream` tool loops correctly, including **streamed function-call arguments** (Vertex-only),
 - support multimodal inputs and outputs where Gemini supports them.
 
-Status: design spec (implementation pending).
+Status: [x] Implemented in codebase (2026-03-03), with adaptive Vertex streamed-arg fallback for model/backend variance.
 
 ---
 
 ## 0. Summary (Decisions)
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/*`, `sdk/client.go`, `sdk/proxy_transport.go`, `pkg/gateway/upstream/factory.go`, `pkg/gateway/compat/catalog.go`, `pkg/gateway/handlers/messages.go`, `pkg/gateway/handlers/runs.go`
 
 ### 0.1 Provider IDs
 
@@ -80,6 +82,8 @@ Notes:
 ---
 
 ## 1. Goals / Non-Goals
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/*`, `pkg/core/providers/gem/*_test.go`, `sdk/run_gemini_thought_signature_test.go`
 
 ### 1.1 Goals
 
@@ -111,6 +115,8 @@ Notes:
 ---
 
 ## 2. Terminology
+Status: [x] Complete (2026-03-03)
+Touched files: `GEMINI_SPEC.md`
 
 - **Developer API**: Gemini Developer API (API key) backend in Go GenAI SDK (`BackendGeminiAPI`).
 - **Vertex backend**: Vertex AI backend in Go GenAI SDK (`BackendVertexAI`), supports streamed function-call args.
@@ -121,6 +127,8 @@ Notes:
 ---
 
 ## 3. Public Surface Area
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/provider.go`, `pkg/core/providers/gem/provider_dev.go`, `pkg/core/providers/gem/provider_vert.go`, `sdk/adapters.go`, `pkg/gateway/upstream/adapters.go`
 
 ### 3.1 Provider package contract
 
@@ -149,6 +157,8 @@ and the SDK/gateway wrap them via adapters (see `sdk/adapters.go`, `pkg/gateway/
 ---
 
 ## 4. Authentication
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/client.go`, `sdk/client.go`, `sdk/proxy_transport.go`, `cmd/proxy-chatbot/main.go`, `pkg/gateway/compat/catalog.go`
 
 ### 4.1 Required inputs
 
@@ -202,6 +212,8 @@ Implementation note:
 ---
 
 ## 5. Capabilities
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/provider.go`, `pkg/gateway/compat/catalog.go`, `pkg/gateway/compat/validate.go`
 
 ### 5.1 ProviderCapabilities fields
 
@@ -223,6 +235,8 @@ Important distinction:
 ---
 
 ## 6. Canonical Request Translation
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/translate_request.go`, `pkg/core/providers/gem/translate_request_test.go`
 
 ### 6.1 Messages
 
@@ -487,6 +501,8 @@ Spec requirement:
 ---
 
 ## 7. Function Tools (SDK-executed)
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/translate_request.go`, `pkg/core/providers/gem/translate_response.go`, `pkg/core/providers/gem/stream.go`, `pkg/core/providers/gem/translate_request_test.go`
 
 ### 7.1 Tool schema mapping
 
@@ -566,6 +582,8 @@ Security:
 ---
 
 ## 8. Native Tools (Provider-executed)
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/translate_request.go`, `pkg/gateway/compat/validate.go`
 
 `vai-lite` normalizes native tools via `types.Tool.Type` values:
 - `web_search`
@@ -638,6 +656,8 @@ Provider behavior should align with `pkg/gateway/compat/validate.go` once update
 ---
 
 ## 9. Streaming Normalization (`Messages.Stream`)
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/provider.go`, `pkg/core/providers/gem/stream.go`, `pkg/core/providers/gem/jsonpath_apply.go`, `pkg/core/providers/gem/stream_test.go`, `pkg/core/providers/gem/provider_stream_fallback_test.go`, `pkg/core/providers/gem/jsonpath_apply_test.go`
 
 ### 9.1 Canonical stream events
 
@@ -686,6 +706,12 @@ To stream args incrementally:
 `gem-dev`:
 - `StreamFunctionCallArguments` is not supported.
 - Emit a single `InputJSONDelta` containing the final args JSON string (best-effort) and still emit start/stop around it.
+
+Implementation delta (2026-03-03):
+- In `gem-vert` API-key mode, support may vary by model/backend path. The provider now uses adaptive behavior:
+  - default auto mode tries `StreamFunctionCallArguments=true`,
+  - on Vertex `INVALID_ARGUMENT` at stream-open it retries once with streaming args disabled,
+  - explicit `extensions.gem.stream_function_call_arguments=true` remains strict (no auto fallback).
 
 Rationale:
 - `sdk/ToolArgStringDecoder` and tool-loop `RunStream.Process` depend on `input_json_delta` deltas.
@@ -825,6 +851,8 @@ If Gemini returns "thought signatures" for tool calls, those are handled in tool
 ---
 
 ## 10. Outputs: Text / Image / Audio / Video
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/translate_request.go`, `pkg/core/providers/gem/translate_response.go`, `pkg/core/providers/gem/translate_response_test.go`
 
 ### 10.1 Text output
 
@@ -886,6 +914,8 @@ Rationale:
 ---
 
 ## 11. Stop Reasons and Usage
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/translate_response.go`, `pkg/core/providers/gem/stream.go`, `pkg/core/providers/gem/translate_response_test.go`
 
 ### 11.1 StopReason mapping (normative)
 
@@ -936,6 +966,8 @@ Backend note:
 ---
 
 ## 12. Errors
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/errors.go`, `pkg/core/providers/gem/errors_test.go`, `pkg/gateway/apierror/apierror.go`, `pkg/gateway/apierror/apierror_test.go`
 
 ### 12.1 Provider error type
 
@@ -991,6 +1023,8 @@ On streaming failures:
 ---
 
 ## 13. Extensions (`req.Extensions`)
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/translate_request.go`, `pkg/core/providers/gem/translate_request_test.go`
 
 Gemini-specific extensions should be namespaced:
 - `req.Extensions["gem"]` is a `map[string]any`
@@ -1087,6 +1121,8 @@ Extension:
 ---
 
 ## 14. Deterministic Tool Loop Requirements (`Run` / `RunStream`)
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/provider.go`, `pkg/core/providers/gem/stream.go`, `pkg/core/providers/gem/translate_request.go`, `pkg/core/providers/gem/translate_response.go`, `pkg/core/providers/gem/provider_stream_fallback_test.go`, `sdk/run.go`, `sdk/run_gemini_thought_signature_test.go`, `sdk/run_voice_test.go`
 
 `sdk/run.go` and `sdk/run_stream_loop` depend on provider behavior.
 
@@ -1122,6 +1158,8 @@ Provider should:
 ---
 
 ## 15. Compatibility Catalog / Validation (Repo-wide updates required)
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/gateway/compat/catalog.go`, `pkg/gateway/compat/validate.go`, `sdk/proxy_transport.go`, `pkg/gateway/handlers/messages.go`, `pkg/gateway/handlers/runs.go`
 
 This spec implies the following catalog/validation changes (implementation tasks):
 
@@ -1143,6 +1181,8 @@ Behavior for requests with:
 ---
 
 ## 16. Implementation Sketch (Files)
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/provider.go`, `pkg/core/providers/gem/provider_vert.go`, `pkg/core/providers/gem/provider_dev.go`, `pkg/core/providers/gem/options.go`, `pkg/core/providers/gem/client.go`, `pkg/core/providers/gem/translate_request.go`, `pkg/core/providers/gem/translate_response.go`, `pkg/core/providers/gem/stream.go`, `pkg/core/providers/gem/errors.go`, `pkg/core/providers/gem/jsonpath_apply.go`, `go.mod`, `go.sum`
 
 Planned file structure:
 
@@ -1181,6 +1221,8 @@ Testing:
 ---
 
 ## 17. Test Plan (Acceptance Criteria)
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/*_test.go`, `pkg/core/providers/gem/provider_stream_fallback_test.go`, `sdk/run_gemini_thought_signature_test.go`, `sdk/run_voice_test.go`, `cmd/proxy-chatbot/main_test.go`, `pkg/gateway/*_test.go`, `integration/suite_test.go`, `integration_proxy/suite_test.go`, `integration/reliability_helpers_test.go`, `integration/voice_test.go`
 
 ### 17.1 Compile gate
 
@@ -1230,6 +1272,8 @@ Testing:
 ---
 
 ## 18. Operational Notes
+Status: [x] Complete (2026-03-03)
+Touched files: `pkg/core/providers/gem/provider.go`, `pkg/core/providers/gem/client.go`, `pkg/core/providers/gem/stream.go`
 
 ### 18.1 Logging
 
@@ -1275,6 +1319,8 @@ Key binding / rotation (normative):
 ---
 
 ## 19. Migration Notes (Repository)
+Status: [x] Complete (2026-03-03)
+Touched files: `sdk/client.go`, `pkg/gateway/upstream/factory.go`, `sdk/proxy_transport.go`, `pkg/gateway/compat/catalog.go`, `pkg/gateway/compat/validate.go`, `integration/suite_test.go`, `integration_proxy/suite_test.go`, `README.md`, `DEVELOPER_GUIDE.md`, `GATEWAY_SPEC.md`, `TS_SDK_DESIGN.md`, `LIVE_AUDIO_MODE_DESIGN.md`, `api/openapi.yaml`
 
 Removing `gemini` and `gemini-oauth` requires coordinated updates:
 - SDK initialization (`sdk/client.go`) should initialize `gem-vert` and `gem-dev`, and remove `gemini` / `gemini-oauth`.
@@ -1291,6 +1337,12 @@ All references should be deleted rather than aliased to keep the surface simple.
 ---
 
 ## 20. References (Upstream Docs)
+Status: [x] Complete (2026-03-03)
+Touched files: `go.mod`, `go.sum`, `GEMINI_SPEC.md`
+
+Implementation deltas observed with `google.golang.org/genai v1.48.0`:
+- `PartialArg` exposes `StringValue`, `BoolValue`, `NumberValue`, `NULLValue`, `JsonPath`, `WillContinue`; fields such as `IntValue`, `DoubleValue`, `StructValue`, `ListValue` are not present in this SDK version, so provider mapping uses the available field set.
+- `genai.APIError` does not expose response headers, so `RetryAfter` cannot be populated directly from SDK error values in the current transport path.
 
 Primary sources used to define concrete behaviors in this spec:
 - Go GenAI SDK reference: `google.golang.org/genai` (pkg.go.dev)

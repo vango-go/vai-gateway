@@ -56,7 +56,7 @@ func runWithProviderRetry[T any](
 		logProviderDiagnostic(t, provider, operation, attempt, class, err)
 
 		if !class.Retryable || attempt == attempts {
-			if provider.Name == "gemini-oauth" && class.Capacity {
+			if provider.Name == "gem-vert" && class.Capacity {
 				t.Skipf(
 					"Skipping %s/%s after %d attempts due provider capacity (%s): %v",
 					provider.Name,
@@ -107,10 +107,10 @@ func enforceProviderThrottle(provider string) {
 
 func providerMinGap(provider string) time.Duration {
 	switch provider {
-	case "gemini-oauth":
-		return time.Duration(envInt("VAI_INTEGRATION_GEMINI_OAUTH_MIN_GAP_MS", 2500)) * time.Millisecond
-	case "gemini":
-		return time.Duration(envInt("VAI_INTEGRATION_GEMINI_MIN_GAP_MS", 750)) * time.Millisecond
+	case "gem-vert":
+		return time.Duration(envInt("VAI_INTEGRATION_GEM_VERT_MIN_GAP_MS", 2500)) * time.Millisecond
+	case "gem-dev":
+		return time.Duration(envInt("VAI_INTEGRATION_GEM_DEV_MIN_GAP_MS", 750)) * time.Millisecond
 	default:
 		return time.Duration(envInt("VAI_INTEGRATION_MIN_GAP_MS", 0)) * time.Millisecond
 	}
@@ -123,13 +123,13 @@ func providerRetryAttempts(provider string) int {
 	}
 
 	switch provider {
-	case "gemini-oauth":
-		n := envInt("VAI_INTEGRATION_GEMINI_OAUTH_RETRY_ATTEMPTS", 4)
+	case "gem-vert":
+		n := envInt("VAI_INTEGRATION_GEM_VERT_RETRY_ATTEMPTS", 4)
 		if n > global {
 			return n
 		}
-	case "gemini":
-		n := envInt("VAI_INTEGRATION_GEMINI_RETRY_ATTEMPTS", 3)
+	case "gem-dev":
+		n := envInt("VAI_INTEGRATION_GEM_DEV_RETRY_ATTEMPTS", 3)
 		if n > global {
 			return n
 		}
@@ -150,7 +150,7 @@ func retryBackoff(provider string, attempt int, capacity bool) time.Duration {
 		}
 	}
 
-	if capacity && provider == "gemini-oauth" {
+	if capacity && provider == "gem-vert" {
 		wait *= 2
 		if wait > maxWait {
 			wait = maxWait

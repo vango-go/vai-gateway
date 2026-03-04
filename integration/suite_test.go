@@ -6,7 +6,6 @@ package integration_test
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -74,21 +73,39 @@ var providerConfigs = []providerConfig{
 		Extensions:               []string{"thinking.budget_tokens"},
 	},
 	{
-		Name:                     "gemini",
-		Model:                    "gemini/gemini-3-flash-preview",
-		KeyName:                  "gemini",
-		RequireKey:               requireGeminiKey,
+		Name:                     "gem-dev",
+		Model:                    "gem-dev/gemini-2.5-flash",
+		KeyName:                  "gem-dev",
+		RequireKey:               requireGemDevKey,
 		SupportsVision:           true,
 		SupportsAudioInput:       true,
 		SupportsVideoInput:       true, // Unique to Gemini
-		SupportsAudioOutput:      false,
+		SupportsAudioOutput:      true,
+		SupportsTools:            true,
+		SupportsToolStreaming:    false,
+		SupportsThinking:         true,
+		SupportsStructuredOutput: true,
+		SupportsStopSequences:    false, // Gemini supports stop sequences but reports STOP for both natural and stop sequence ends
+		SupportsTemperature:      true,
+		NativeTools:              []string{"google_search", "code_execution", "image_generation"},
+		Extensions:               []string{"thinking_level", "thinking_budget", "media_resolution", "thought_signatures", "grounding_metadata"},
+	},
+	{
+		Name:                     "gem-vert",
+		Model:                    "gem-vert/gemini-3-flash-preview",
+		KeyName:                  "gem-vert",
+		RequireKey:               requireGemVertKey,
+		SupportsVision:           true,
+		SupportsAudioInput:       true,
+		SupportsVideoInput:       true,
+		SupportsAudioOutput:      true,
 		SupportsTools:            true,
 		SupportsToolStreaming:    true,
 		SupportsThinking:         true,
-		SupportsStructuredOutput: false, // Gemini 3 preview models don't reliably respect JSON schema yet
-		SupportsStopSequences:    false, // Gemini supports stop sequences but reports STOP for both natural and stop sequence ends
+		SupportsStructuredOutput: true,
+		SupportsStopSequences:    false,
 		SupportsTemperature:      true,
-		NativeTools:              []string{"google_search", "code_execution", "file_search", "computer_use", "image_generation"},
+		NativeTools:              []string{"google_search", "code_execution", "image_generation"},
 		Extensions:               []string{"thinking_level", "thinking_budget", "media_resolution", "thought_signatures", "grounding_metadata"},
 	},
 	{
@@ -144,24 +161,6 @@ var providerConfigs = []providerConfig{
 		SupportsTemperature:      true,
 		NativeTools:              []string{},
 		Extensions:               []string{},
-	},
-	{
-		Name:                     "gemini-oauth",
-		Model:                    "gemini-oauth/gemini-3-pro-preview",
-		KeyName:                  "gemini-oauth",
-		RequireKey:               requireGeminiOAuthProjectID,
-		SupportsVision:           true,
-		SupportsAudioInput:       true,
-		SupportsVideoInput:       true,
-		SupportsAudioOutput:      false,
-		SupportsTools:            true,
-		SupportsToolStreaming:    true,
-		SupportsThinking:         true,
-		SupportsStructuredOutput: false, // Same as regular Gemini
-		SupportsStopSequences:    false, // Same as regular Gemini
-		SupportsTemperature:      true,
-		NativeTools:              []string{"google_search", "code_execution", "file_search", "computer_use", "image_generation"},
-		Extensions:               []string{"thinking_level", "thinking_budget", "media_resolution", "thought_signatures", "grounding_metadata"},
 	},
 }
 
@@ -334,9 +333,15 @@ func requireOpenAIKey(t *testing.T) {
 	}
 }
 
-func requireGeminiKey(t *testing.T) {
-	if os.Getenv("GEMINI_API_KEY") == "" {
-		t.Skip("GEMINI_API_KEY not set")
+func requireGemDevKey(t *testing.T) {
+	if os.Getenv("GEMINI_API_KEY") == "" && os.Getenv("GOOGLE_API_KEY") == "" {
+		t.Skip("GEMINI_API_KEY (or GOOGLE_API_KEY fallback) not set")
+	}
+}
+
+func requireGemVertKey(t *testing.T) {
+	if os.Getenv("VERTEXAI_API_KEY") == "" {
+		t.Skip("VERTEXAI_API_KEY not set")
 	}
 }
 
@@ -349,29 +354,6 @@ func requireGroqKey(t *testing.T) {
 func requireOpenRouterKey(t *testing.T) {
 	if os.Getenv("OPENROUTER_API_KEY") == "" {
 		t.Skip("OPENROUTER_API_KEY not set")
-	}
-}
-
-func requireGeminiOAuthProjectID(t *testing.T) {
-	// Check env var first
-	if os.Getenv("GEMINI_OAUTH_PROJECT_ID") != "" {
-		return
-	}
-	// Check credentials file
-	home, err := os.UserHomeDir()
-	if err != nil {
-		t.Skip("GEMINI_OAUTH_PROJECT_ID not set and cannot find home dir")
-	}
-	credsPath := filepath.Join(home, ".config", "vango", "gemini-oauth-credentials.json")
-	data, err := os.ReadFile(credsPath)
-	if err != nil {
-		t.Skip("GEMINI_OAUTH_PROJECT_ID not set and no credentials file found")
-	}
-	var creds struct {
-		ProjectID string `json:"project_id"`
-	}
-	if err := json.Unmarshal(data, &creds); err != nil || creds.ProjectID == "" {
-		t.Skip("GEMINI_OAUTH_PROJECT_ID not set and credentials file has no project_id")
 	}
 }
 

@@ -108,8 +108,8 @@ var curatedModels = []CatalogModel{
 		},
 	},
 	{
-		ID:       "gemini/gemini-2.5-pro",
-		Provider: "gemini",
+		ID:       "gem-dev/gemini-2.5-pro",
+		Provider: "gem-dev",
 		Name:     "gemini-2.5-pro",
 		Capabilities: ModelCapabilities{
 			Streaming:        SupportSupported,
@@ -123,9 +123,54 @@ var curatedModels = []CatalogModel{
 		},
 	},
 	{
-		ID:       "gemini/gemini-2.5-flash",
-		Provider: "gemini",
+		ID:       "gem-dev/gemini-2.5-flash",
+		Provider: "gem-dev",
 		Name:     "gemini-2.5-flash",
+		Capabilities: ModelCapabilities{
+			Streaming:        SupportSupported,
+			Tools:            SupportSupported,
+			NativeWebSearch:  SupportSupported,
+			NativeCodeExec:   SupportSupported,
+			Vision:           SupportSupported,
+			Documents:        SupportSupported,
+			StructuredOutput: SupportSupported,
+			Thinking:         SupportSupported,
+		},
+	},
+	{
+		ID:       "gem-vert/gemini-2.5-pro",
+		Provider: "gem-vert",
+		Name:     "gemini-2.5-pro",
+		Capabilities: ModelCapabilities{
+			Streaming:        SupportSupported,
+			Tools:            SupportSupported,
+			NativeWebSearch:  SupportSupported,
+			NativeCodeExec:   SupportSupported,
+			Vision:           SupportSupported,
+			Documents:        SupportSupported,
+			StructuredOutput: SupportSupported,
+			Thinking:         SupportSupported,
+		},
+	},
+	{
+		ID:       "gem-vert/gemini-2.5-flash",
+		Provider: "gem-vert",
+		Name:     "gemini-2.5-flash",
+		Capabilities: ModelCapabilities{
+			Streaming:        SupportSupported,
+			Tools:            SupportSupported,
+			NativeWebSearch:  SupportSupported,
+			NativeCodeExec:   SupportSupported,
+			Vision:           SupportSupported,
+			Documents:        SupportSupported,
+			StructuredOutput: SupportSupported,
+			Thinking:         SupportSupported,
+		},
+	},
+	{
+		ID:       "gem-vert/gemini-3-flash-preview",
+		Provider: "gem-vert",
+		Name:     "gemini-3-flash-preview",
 		Capabilities: ModelCapabilities{
 			Streaming:        SupportSupported,
 			Tools:            SupportSupported,
@@ -221,10 +266,10 @@ func ProviderKeyHeader(provider string) (string, bool) {
 		return "X-Provider-Key-OpenAI", true
 	case "oai-resp":
 		return "X-Provider-Key-OpenAI", true
-	case "gemini":
+	case "gem-dev":
 		return "X-Provider-Key-Gemini", true
-	case "gemini-oauth":
-		return "X-Provider-Key-Gemini", true
+	case "gem-vert":
+		return "X-Provider-Key-VertexAI", true
 	case "groq":
 		return "X-Provider-Key-Groq", true
 	case "cerebras":

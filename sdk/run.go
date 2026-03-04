@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/vango-go/vai-lite/pkg/core/types"
 	"github.com/vango-go/vai-lite/pkg/core/voice/tts"
@@ -1052,6 +1053,16 @@ func (vs *runVoiceStreamer) Transcript() string {
 	return strings.TrimSpace(vs.transcript.String())
 }
 
+func hasSpokenText(text string) bool {
+	text = strings.TrimSpace(text)
+	for _, r := range text {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
+		}
+	}
+	return false
+}
+
 // runStreamLoop executes the streaming tool loop.
 func (s *MessagesService) runStreamLoop(ctx context.Context, req *MessageRequest, cfg *runConfig) *RunStream {
 	var prepErr error
@@ -1174,6 +1185,21 @@ func (rs *RunStream) run(ctx context.Context, svc *MessagesService, req *Message
 			resp.Metadata["user_transcript"] = userTranscript
 		}
 		if !voiceEnabled || voiceStream == nil {
+			return nil
+		}
+		if !hasSpokenText(voiceStream.Transcript()) {
+			fallbackText := strings.TrimSpace(resp.TextContent())
+			if hasSpokenText(fallbackText) {
+				if err := voiceStream.AddText(fallbackText); err != nil {
+					return err
+				}
+			}
+		}
+		if !hasSpokenText(voiceStream.Transcript()) {
+			if err := voiceStream.Close(); err != nil {
+				return err
+			}
+			voiceStream = nil
 			return nil
 		}
 		if err := voiceStream.Flush(); err != nil {

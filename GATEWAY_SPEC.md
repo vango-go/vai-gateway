@@ -378,7 +378,8 @@ The gateway MUST NOT forward provider key headers to any outbound destination ot
 |--------|-------------|
 | `X-Provider-Key-Anthropic` | `anthropic/*` |
 | `X-Provider-Key-OpenAI` | `openai/*`, `oai-resp/*` |
-| `X-Provider-Key-Gemini` | `gemini/*`, `gemini-oauth/*` |
+| `X-Provider-Key-Gemini` | `gem-dev/*` |
+| `X-Provider-Key-VertexAI` | `gem-vert/*` |
 | `X-Provider-Key-Groq` | `groq/*` |
 | `X-Provider-Key-Cerebras` | `cerebras/*` |
 | `X-Provider-Key-OpenRouter` | `openrouter/*` |
@@ -1948,7 +1949,7 @@ flowchart LR
     - Proxy mode: becomes the source of BYOK headers (the gateway receives the key; the SDK must not call providers directly).
 - Transport architecture (recommended approach):
   - Implement a “gateway proxy provider” that satisfies `core.Provider` but sends requests to the gateway’s HTTP API.
-  - Register one proxy provider per provider prefix (`anthropic`, `openai`, `oai-resp`, `groq`, `cerebras`, `openrouter`, `gemini`, `gemini-oauth`, …) so existing model strings remain stable.
+  - Register one proxy provider per provider prefix (`anthropic`, `openai`, `oai-resp`, `groq`, `cerebras`, `openrouter`, `gem-dev`, `gem-vert`, …) so existing model strings remain stable.
     - This is required because `core.Engine` routes on the provider prefix and strips it before calling `Provider.CreateMessage/StreamMessage`; the proxy provider must reconstruct the full model string as `<provider>/<modelName>` for the gateway request.
   - When proxy mode is enabled, skip direct-provider initialization and register the proxy providers instead (no accidental “half direct / half gateway” behavior).
 - HTTP request details (proxy mode):
@@ -2222,7 +2223,8 @@ Implement and validate this *minimum* schema (allow unknown fields for forward-c
   "byok": {
     "anthropic": "sk-ant-...",   // required if model provider is anthropic
     "openai": "sk-...",          // required if model provider is openai or oai-resp
-    "gemini": "sk-...",          // required if model provider is gemini or gemini-oauth
+    "gem-dev": "sk-...",         // required if model provider is gem-dev
+    "gem-vert": "sk-...",        // required if model provider is gem-vert
     "cartesia": "sk-car-..."     // required in 9A (STT + TTS)
   },
   "audio_in": {"encoding":"pcm_s16le","sample_rate_hz":16000,"channels":1},
@@ -2451,7 +2453,8 @@ Provider BYOK for LLM:
 - Map to required BYOK entry:
   - `anthropic/*` → `hello.byok.anthropic`
   - `openai/*` and `oai-resp/*` → `hello.byok.openai`
-  - `gemini/*` and `gemini-oauth/*` → `hello.byok.gemini`
+  - `gem-dev/*` → `hello.byok.gem-dev`
+  - `gem-vert/*` → `hello.byok.gem-vert`
 - If missing: send terminal `error(scope="turn", code="unauthorized")` and remain connected (or close if auth_mode required; decision: per-turn error, keep session).
 
 ### talk_to_user execution (Cartesia TTS)

@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -27,8 +26,8 @@ var providerByokHeaders = map[string]string{
 	"anthropic":    "X-Provider-Key-Anthropic",
 	"openai":       "X-Provider-Key-OpenAI",
 	"oai-resp":     "X-Provider-Key-OpenAI",
-	"gemini":       "X-Provider-Key-Gemini",
-	"gemini-oauth": "X-Provider-Key-Gemini",
+	"gem-dev":      "X-Provider-Key-Gemini",
+	"gem-vert":     "X-Provider-Key-VertexAI",
 	"groq":         "X-Provider-Key-Groq",
 	"cerebras":     "X-Provider-Key-Cerebras",
 	"openrouter":   "X-Provider-Key-OpenRouter",
@@ -45,8 +44,8 @@ func (c *Client) initProxyProviders() {
 		"groq",
 		"cerebras",
 		"openrouter",
-		"gemini",
-		"gemini-oauth",
+		"gem-dev",
+		"gem-vert",
 	} {
 		c.core.RegisterProvider(&gatewayProxyProvider{
 			client:       c,
@@ -254,22 +253,16 @@ func (c *Client) providerKeyForProvider(providerName string) string {
 			return key
 		}
 		return c.core.GetAPIKey("openai")
-	case "gemini":
-		if key := c.core.GetAPIKey("gemini"); key != "" {
+	case "gem-dev":
+		if key := c.core.GetAPIKey("gem-dev"); key != "" {
 			return key
 		}
-		if key := c.core.GetAPIKey("gemini-oauth"); key != "" {
+		return ""
+	case "gem-vert":
+		if key := c.core.GetAPIKey("gem-vert"); key != "" {
 			return key
 		}
-		return os.Getenv("GOOGLE_API_KEY")
-	case "gemini-oauth":
-		if key := c.core.GetAPIKey("gemini-oauth"); key != "" {
-			return key
-		}
-		if key := c.core.GetAPIKey("gemini"); key != "" {
-			return key
-		}
-		return os.Getenv("GOOGLE_API_KEY")
+		return ""
 	default:
 		return c.core.GetAPIKey(providerName)
 	}

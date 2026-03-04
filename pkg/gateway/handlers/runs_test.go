@@ -300,7 +300,7 @@ func TestRunsHandler_BlockingSuccess(t *testing.T) {
 	}
 }
 
-func TestRunsHandler_GeminiOAuthProviderAccepted(t *testing.T) {
+func TestRunsHandler_LegacyGeminiProviderRejected(t *testing.T) {
 	h := RunsHandler{Config: baseRunsConfig(), Upstreams: fakeFactory{p: &fakeRunProvider{}}, Stream: false}
 	req := httptest.NewRequest(http.MethodPost, "/v1/runs", bytes.NewReader([]byte(`{
 		"request":{"model":"gemini-oauth/test","messages":[{"role":"user","content":"hi"}]}
@@ -308,11 +308,11 @@ func TestRunsHandler_GeminiOAuthProviderAccepted(t *testing.T) {
 	req.Header.Set("X-Provider-Key-Gemini", "sk-test")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
+	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if strings.Contains(rr.Body.String(), `"unsupported provider"`) {
-		t.Fatalf("unexpected unsupported provider error: %s", rr.Body.String())
+	if !strings.Contains(rr.Body.String(), "provider has been removed") {
+		t.Fatalf("expected migration error, got: %s", rr.Body.String())
 	}
 }
 

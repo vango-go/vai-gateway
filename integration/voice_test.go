@@ -26,8 +26,9 @@ func voiceTestModel(t *testing.T) string {
 	}{
 		{envKey: "ANTHROPIC_API_KEY", model: "anthropic/claude-haiku-4-5-20251001"},
 		{envKey: "OPENAI_API_KEY", model: "oai-resp/gpt-5-mini"},
-		{envKey: "GEMINI_API_KEY", model: "gemini/gemini-3-flash-preview"},
-		{envKey: "GOOGLE_API_KEY", model: "gemini/gemini-3-flash-preview"},
+		{envKey: "GEMINI_API_KEY", model: "gem-dev/gemini-2.5-flash"},
+		{envKey: "GOOGLE_API_KEY", model: "gem-dev/gemini-2.5-flash"},
+		{envKey: "VERTEXAI_API_KEY", model: "gem-vert/gemini-3-flash-preview"},
 		{envKey: "GROQ_API_KEY", model: "groq/moonshotai/kimi-k2-instruct-0905"},
 	}
 

@@ -101,10 +101,11 @@ func collectProviderKeys(getenv func(string) string) map[string]string {
 	setIfPresent("groq", "GROQ_API_KEY")
 	setIfPresent("cerebras", "CEREBRAS_API_KEY")
 	setIfPresent("openrouter", "OPENROUTER_API_KEY")
-	setIfPresent("gemini", "GEMINI_API_KEY")
-	if _, ok := keys["gemini"]; !ok {
-		setIfPresent("gemini", "GOOGLE_API_KEY")
+	setIfPresent("gem-dev", "GEMINI_API_KEY")
+	if _, ok := keys["gem-dev"]; !ok {
+		setIfPresent("gem-dev", "GOOGLE_API_KEY")
 	}
+	setIfPresent("gem-vert", "VERTEXAI_API_KEY")
 	setIfPresent("cartesia", "CARTESIA_API_KEY")
 	setIfPresent("elevenlabs", "ELEVENLABS_API_KEY")
 	setIfPresent("tavily", "TAVILY_API_KEY")
@@ -146,8 +147,10 @@ func requiredKeySpec(provider string) (envHint string, ok bool) {
 		return "CEREBRAS_API_KEY", true
 	case "openrouter":
 		return "OPENROUTER_API_KEY", true
-	case "gemini", "gemini-oauth":
+	case "gem-dev":
 		return "GEMINI_API_KEY (or GOOGLE_API_KEY)", true
+	case "gem-vert":
+		return "VERTEXAI_API_KEY", true
 	default:
 		return "", false
 	}
@@ -161,8 +164,10 @@ func hasKeyForProvider(provider string, keyStore map[string]string) bool {
 	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "openai", "oai-resp":
 		return strings.TrimSpace(keyStore["openai"]) != ""
-	case "gemini", "gemini-oauth":
-		return strings.TrimSpace(keyStore["gemini"]) != ""
+	case "gem-dev":
+		return strings.TrimSpace(keyStore["gem-dev"]) != ""
+	case "gem-vert":
+		return strings.TrimSpace(keyStore["gem-vert"]) != ""
 	default:
 		return strings.TrimSpace(keyStore[strings.ToLower(strings.TrimSpace(provider))]) != ""
 	}
@@ -244,7 +249,7 @@ func buildClientOptions(cfg chatConfig) []vai.ClientOption {
 	}
 
 	// Keep provider registration explicit and stable.
-	for _, provider := range []string{"anthropic", "openai", "groq", "cerebras", "openrouter", "gemini", "cartesia", "elevenlabs", "tavily", "exa", "firecrawl"} {
+	for _, provider := range []string{"anthropic", "openai", "groq", "cerebras", "openrouter", "gem-dev", "gem-vert", "cartesia", "elevenlabs", "tavily", "exa", "firecrawl"} {
 		if key := strings.TrimSpace(cfg.ProviderKeys[provider]); key != "" {
 			opts = append(opts, vai.WithProviderKey(provider, key))
 		}

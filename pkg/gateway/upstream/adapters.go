@@ -6,7 +6,7 @@ import (
 	"github.com/vango-go/vai-lite/pkg/core"
 	"github.com/vango-go/vai-lite/pkg/core/providers/anthropic"
 	"github.com/vango-go/vai-lite/pkg/core/providers/cerebras"
-	"github.com/vango-go/vai-lite/pkg/core/providers/gemini"
+	"github.com/vango-go/vai-lite/pkg/core/providers/gem"
 	"github.com/vango-go/vai-lite/pkg/core/providers/groq"
 	"github.com/vango-go/vai-lite/pkg/core/providers/oai_resp"
 	"github.com/vango-go/vai-lite/pkg/core/providers/openai"
@@ -215,20 +215,20 @@ type openrouterEventStreamAdapter struct{ stream openrouter.EventStream }
 func (a *openrouterEventStreamAdapter) Next() (types.StreamEvent, error) { return a.stream.Next() }
 func (a *openrouterEventStreamAdapter) Close() error                     { return a.stream.Close() }
 
-type geminiAdapter struct{ provider *gemini.Provider }
+type gemAdapter struct{ provider *gem.Provider }
 
-func (a *geminiAdapter) Name() string { return a.provider.Name() }
-func (a *geminiAdapter) CreateMessage(ctx context.Context, req *types.MessageRequest) (*types.MessageResponse, error) {
+func (a *gemAdapter) Name() string { return a.provider.Name() }
+func (a *gemAdapter) CreateMessage(ctx context.Context, req *types.MessageRequest) (*types.MessageResponse, error) {
 	return a.provider.CreateMessage(ctx, req)
 }
-func (a *geminiAdapter) StreamMessage(ctx context.Context, req *types.MessageRequest) (core.EventStream, error) {
+func (a *gemAdapter) StreamMessage(ctx context.Context, req *types.MessageRequest) (core.EventStream, error) {
 	stream, err := a.provider.StreamMessage(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	return &geminiEventStreamAdapter{stream: stream}, nil
+	return &gemEventStreamAdapter{stream: stream}, nil
 }
-func (a *geminiAdapter) Capabilities() core.ProviderCapabilities {
+func (a *gemAdapter) Capabilities() core.ProviderCapabilities {
 	caps := a.provider.Capabilities()
 	return core.ProviderCapabilities{
 		Vision:           caps.Vision,
@@ -243,7 +243,7 @@ func (a *geminiAdapter) Capabilities() core.ProviderCapabilities {
 	}
 }
 
-type geminiEventStreamAdapter struct{ stream gemini.EventStream }
+type gemEventStreamAdapter struct{ stream gem.EventStream }
 
-func (a *geminiEventStreamAdapter) Next() (types.StreamEvent, error) { return a.stream.Next() }
-func (a *geminiEventStreamAdapter) Close() error                     { return a.stream.Close() }
+func (a *gemEventStreamAdapter) Next() (types.StreamEvent, error) { return a.stream.Next() }
+func (a *gemEventStreamAdapter) Close() error                     { return a.stream.Close() }

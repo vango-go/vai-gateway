@@ -48,6 +48,7 @@ paths:
         - $ref: "#/components/parameters/XProviderKeyAnthropic"
         - $ref: "#/components/parameters/XProviderKeyOpenAI"
         - $ref: "#/components/parameters/XProviderKeyGemini"
+        - $ref: "#/components/parameters/XProviderKeyVertexAI"
         - $ref: "#/components/parameters/XProviderKeyGroq"
         - $ref: "#/components/parameters/XProviderKeyCerebras"
         - $ref: "#/components/parameters/XProviderKeyOpenRouter"
@@ -168,6 +169,7 @@ paths:
         - $ref: "#/components/parameters/XProviderKeyAnthropic"
         - $ref: "#/components/parameters/XProviderKeyOpenAI"
         - $ref: "#/components/parameters/XProviderKeyGemini"
+        - $ref: "#/components/parameters/XProviderKeyVertexAI"
         - $ref: "#/components/parameters/XProviderKeyGroq"
         - $ref: "#/components/parameters/XProviderKeyCerebras"
         - $ref: "#/components/parameters/XProviderKeyOpenRouter"
@@ -245,6 +247,7 @@ paths:
         - $ref: "#/components/parameters/XProviderKeyAnthropic"
         - $ref: "#/components/parameters/XProviderKeyOpenAI"
         - $ref: "#/components/parameters/XProviderKeyGemini"
+        - $ref: "#/components/parameters/XProviderKeyVertexAI"
         - $ref: "#/components/parameters/XProviderKeyGroq"
         - $ref: "#/components/parameters/XProviderKeyCerebras"
         - $ref: "#/components/parameters/XProviderKeyOpenRouter"
@@ -453,7 +456,14 @@ components:
       in: header
       required: false
       schema: { type: string }
-      description: BYOK header for `gemini/*` and `gemini-oauth/*` models.
+      description: BYOK header for `gem-dev/*` models.
+
+    XProviderKeyVertexAI:
+      name: X-Provider-Key-VertexAI
+      in: header
+      required: false
+      schema: { type: string }
+      description: BYOK header for `gem-vert/*` models.
 
     XProviderKeyGroq:
       name: X-Provider-Key-Groq

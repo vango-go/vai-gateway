@@ -5,8 +5,7 @@ import (
 	"testing"
 
 	"github.com/vango-go/vai-lite/pkg/core"
-	"github.com/vango-go/vai-lite/pkg/core/providers/gemini"
-	"github.com/vango-go/vai-lite/pkg/core/providers/gemini_oauth"
+	"github.com/vango-go/vai-lite/pkg/core/providers/gem"
 )
 
 func TestFromError_ContextCanceled_Is408Cancelled(t *testing.T) {
@@ -35,10 +34,10 @@ func TestFromError_Overloaded_Is529(t *testing.T) {
 	}
 }
 
-func TestFromError_GeminiError_Preserved(t *testing.T) {
+func TestFromError_GemError_Preserved(t *testing.T) {
 	providerErr := map[string]any{"status": "RESOURCE_EXHAUSTED", "message": "quota exceeded"}
-	ce, status := FromError(&gemini.Error{
-		Type:          gemini.ErrRateLimit,
+	ce, status := FromError(&gem.Error{
+		Type:          gem.ErrRateLimit,
 		Message:       "quota exceeded",
 		Code:          "RESOURCE_EXHAUSTED",
 		ProviderError: providerErr,
@@ -63,14 +62,14 @@ func TestFromError_GeminiError_Preserved(t *testing.T) {
 	}
 }
 
-func TestFromError_GeminiOAuthError_Preserved(t *testing.T) {
+func TestFromError_GemErrorAPI_Preserved(t *testing.T) {
 	providerErr := map[string]any{"status": "INTERNAL", "message": "backend failure"}
-	ce, status := FromError(&gemini_oauth.Error{
-		Type:          gemini_oauth.ErrAPI,
+	ce, status := FromError(&gem.Error{
+		Type:          gem.ErrAPI,
 		Message:       "backend failure",
 		Code:          "INTERNAL",
 		ProviderError: providerErr,
-	}, "req_gemini_oauth")
+	}, "req_gem")
 	if status != 500 {
 		t.Fatalf("status=%d", status)
 	}
@@ -83,7 +82,7 @@ func TestFromError_GeminiOAuthError_Preserved(t *testing.T) {
 	if ce.Code != "INTERNAL" {
 		t.Fatalf("code=%q", ce.Code)
 	}
-	if ce.RequestID != "req_gemini_oauth" {
+	if ce.RequestID != "req_gem" {
 		t.Fatalf("request_id=%q", ce.RequestID)
 	}
 	if ce.ProviderError == nil {

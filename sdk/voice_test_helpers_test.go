@@ -46,8 +46,9 @@ type fakeSDKTTSProvider struct {
 	synthAudio []byte
 	synthErr   error
 
-	streamSendErr error
-	newStreamErr  error
+	streamSendErr    error
+	newStreamErr     error
+	failOnEmptyFinal bool
 
 	synthCalls    int
 	streamedTexts []string
@@ -93,6 +94,12 @@ func (f *fakeSDKTTSProvider) NewStreamingContext(_ context.Context, _ tts.Stream
 		}
 
 		trimmed := strings.TrimSpace(text)
+		if isFinal && trimmed == "" && f.failOnEmptyFinal {
+			err := errors.New("invalid transcript: empty")
+			sc.SetError(err)
+			closeOnce.Do(func() { sc.FinishAudio() })
+			return err
+		}
 		if trimmed != "" {
 			sc.PushAudio([]byte("aud:" + trimmed))
 		}

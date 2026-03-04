@@ -102,7 +102,7 @@ func TestParseModelString(t *testing.T) {
 	}{
 		{"anthropic/claude-sonnet-4", "anthropic", "claude-sonnet-4", false},
 		{"openai/gpt-4o", "openai", "gpt-4o", false},
-		{"gemini/gemini-2.0-flash", "gemini", "gemini-2.0-flash", false},
+		{"gem-dev/gemini-2.5-flash", "gem-dev", "gemini-2.5-flash", false},
 		{"groq/llama-3.3-70b", "groq", "llama-3.3-70b", false},
 		{"invalid", "", "", true},
 		{"", "", "", true},

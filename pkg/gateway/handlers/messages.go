@@ -91,6 +91,15 @@ func (h MessagesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, reqID, err, false)
 		return
 	}
+	if providerName == "gemini" || providerName == "gemini-oauth" {
+		h.writeErrorJSON(w, reqID, &core.Error{
+			Type:      core.ErrInvalidRequest,
+			Message:   "provider has been removed; use gem-vert/<model> or gem-dev/<model>",
+			Param:     "model",
+			RequestID: reqID,
+		}, http.StatusBadRequest)
+		return
+	}
 
 	upstreamKeyHeader, ok := compat.ProviderKeyHeader(providerName)
 	if !ok {

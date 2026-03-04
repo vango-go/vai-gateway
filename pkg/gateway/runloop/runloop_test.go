@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/vango-go/vai-lite/pkg/core"
-	"github.com/vango-go/vai-lite/pkg/core/providers/gemini"
+	"github.com/vango-go/vai-lite/pkg/core/providers/gem"
 	"github.com/vango-go/vai-lite/pkg/core/types"
 	"github.com/vango-go/vai-lite/pkg/core/voice"
 	"github.com/vango-go/vai-lite/pkg/core/voice/tts"
@@ -560,8 +560,8 @@ func TestRunBlocking_ParallelVsSequentialToolExecution(t *testing.T) {
 }
 
 func TestToTypesError_GeminiErrorMapped(t *testing.T) {
-	got := toTypesError(&gemini.Error{
-		Type:          gemini.ErrRateLimit,
+	got := toTypesError(&gem.Error{
+		Type:          gem.ErrRateLimit,
 		Message:       "quota exceeded",
 		Code:          "RESOURCE_EXHAUSTED",
 		ProviderError: map[string]any{"status": "RESOURCE_EXHAUSTED"},

@@ -104,7 +104,7 @@ Key directories you’ll touch:
 - `pkg/core/` — shared core types + providers (SDK uses these directly)
   - `pkg/core/engine.go` — provider registry + `provider/model` routing
   - `pkg/core/types/*` — canonical API types (requests, responses, blocks, tools, streaming events)
-  - `pkg/core/providers/*` — provider implementations (anthropic/openai/gemini/groq/etc.)
+  - `pkg/core/providers/*` — provider implementations (anthropic/openai/gem/groq/etc.)
   - `pkg/core/sseframe/parser.go` — shared SSE frame parser used by streaming providers
   - `pkg/core/errorfmt/format.go` — shared rich error formatter used by SDK + CLIs
 
@@ -145,7 +145,8 @@ The core engine loads keys from environment variables in the form:
 - `GROQ_API_KEY`
 - `CEREBRAS_API_KEY`
 - `OPENROUTER_API_KEY`
-- `GEMINI_API_KEY` (also accepts `GOOGLE_API_KEY` as a fallback)
+- `GEMINI_API_KEY` (for `gem-dev`, also accepts `GOOGLE_API_KEY` as a fallback)
+- `VERTEXAI_API_KEY` (for `gem-vert`)
 - `CARTESIA_API_KEY` (for non-live STT/TTS voice mode)
 
 Example:
@@ -203,17 +204,12 @@ Current defaults in-tree:
 - `groq` and `cerebras` use `max_tokens` and emit `groq/<model>` / `cerebras/<model>`.
 - `openrouter` uses `max_tokens`, emits `openrouter/<model>`, and supports optional attribution headers via `openrouter.WithSiteURL(...)` / `openrouter.WithSiteName(...)`.
 
-### Gemini OAuth (optional)
+### Gemini providers
 
-The SDK will attempt to initialize the `gemini_oauth` provider if credentials exist at:
+Gemini is split into two providers:
 
-- `~/.config/vango/gemini-oauth-credentials.json`
-
-Optional env var:
-
-- `GEMINI_OAUTH_PROJECT_ID`
-
-If OAuth credentials aren’t present or initialization fails, the SDK just logs a debug message and continues.
+- `gem-dev` (Gemini Developer API backend; key from `GEMINI_API_KEY`, fallback `GOOGLE_API_KEY`)
+- `gem-vert` (Vertex AI backend; key from `VERTEXAI_API_KEY`)
 
 ---
 
@@ -255,8 +251,8 @@ Examples:
 - `oai-resp/gpt-4o` (OpenAI Responses API provider in this repo; name is provider-specific)
 - `groq/llama-3.3-70b`
 - `openrouter/openai/gpt-4o`
-- `gemini/gemini-2.0-flash`
-- `gemini-oauth/gemini-2.0-flash`
+- `gem-dev/gemini-2.5-flash`
+- `gem-vert/gemini-3-flash-preview`
 - `cerebras/llama-3.1-8b`
 
 Routing happens in `pkg/core/engine.go` by splitting on the first `/`.
@@ -1139,7 +1135,7 @@ The SDK itself is intentionally minimal about logging. You can provide a logger 
 client := vai.NewClient(vai.WithLogger(myLogger))
 ```
 
-Providers may log debug messages in some cases (e.g. gemini oauth init failure).
+Providers may log debug messages in some cases.
 
 For production SLOs, fallback policy, incident handling, and release criteria, see `PRODUCTION_OPERATIONS.md`.
 
@@ -1166,20 +1162,20 @@ gofmt -w $(find pkg sdk -name '*.go')
 Integration tests support per-provider targeting:
 
 ```bash
-VAI_INTEGRATION_PROVIDERS=gemini-oauth go test -tags=integration ./integration -count=1 -timeout=45m -v
+VAI_INTEGRATION_PROVIDERS=gem-vert go test -tags=integration ./integration -count=1 -timeout=45m -v
 ```
 
-`VAI_INTEGRATION_PROVIDERS` accepts a comma-separated provider list (`anthropic,oai-resp,groq,openrouter,gemini,gemini-oauth`) or `all`.
+`VAI_INTEGRATION_PROVIDERS` accepts a comma-separated provider list (`anthropic,oai-resp,groq,openrouter,gem-dev,gem-vert`) or `all`.
 
 Reliability controls for capacity-prone providers:
 
 - `VAI_INTEGRATION_RETRY_ATTEMPTS`
-- `VAI_INTEGRATION_GEMINI_RETRY_ATTEMPTS`
-- `VAI_INTEGRATION_GEMINI_OAUTH_RETRY_ATTEMPTS`
+- `VAI_INTEGRATION_GEM_DEV_RETRY_ATTEMPTS`
+- `VAI_INTEGRATION_GEM_VERT_RETRY_ATTEMPTS`
 - `VAI_INTEGRATION_RETRY_BASE_MS`
 - `VAI_INTEGRATION_RETRY_MAX_MS`
-- `VAI_INTEGRATION_GEMINI_MIN_GAP_MS`
-- `VAI_INTEGRATION_GEMINI_OAUTH_MIN_GAP_MS`
+- `VAI_INTEGRATION_GEM_DEV_MIN_GAP_MS`
+- `VAI_INTEGRATION_GEM_VERT_MIN_GAP_MS`
 - `VAI_INTEGRATION_DIAGNOSTICS=1` (structured retry/classification logs)
 
 ### 11.2 CI release gate workflow
@@ -1284,7 +1280,7 @@ Required fields (minimum):
   - `elevenlabs`
 
 Credentials (BYOK, in-band in `hello.byok`):
-- LLM provider key is required for the selected `hello.model` provider (for example `anthropic` / `openai` / `gemini`).
+- LLM provider key is required for the selected `hello.model` provider (for example `anthropic` / `openai` / `gem-dev` / `gem-vert`).
 - Cartesia key is required for STT in v1 (Live STT is Cartesia-only): `hello.byok.cartesia`.
 - If `hello.voice.provider="elevenlabs"`:
   - `hello.byok.elevenlabs` is required.

@@ -225,7 +225,8 @@ Normative v1 guidance:
     "keys": {
       "anthropic": "sk-ant-...",
       "openai": "sk-...",
-      "gemini": "sk-...",
+      "gem-dev": "sk-...",
+      "gem-vert": "sk-...",
       "groq": "sk-groq-...",
       "cerebras": "sk-cbr-...",
       "openrouter": "sk-or-..."
@@ -255,7 +256,7 @@ Normative v1 guidance:
 
 Notes:
 - `byok.keys` is the recommended future-proof shape: a map from provider id (the model prefix before the first `/`) to that provider’s API key.
-- Alias behavior: `oai-resp/*` uses the `openai` key by default (override with `byok.keys["oai-resp"]`). `gemini-oauth/*` uses the `gemini` key by default (override with `byok.keys["gemini-oauth"]`).
+- Alias behavior: `oai-resp/*` uses the `openai` key by default (override with `byok.keys["oai-resp"]`). Gemini uses explicit keys per provider id (`gem-dev` and `gem-vert`).
 - Legacy typed `byok.<provider>` fields may still be accepted for compatibility.
 - `stt` and `tts` are required in v1. At minimum:
   - `stt.model` is required (v1: `cartesia/ink-whisper`)

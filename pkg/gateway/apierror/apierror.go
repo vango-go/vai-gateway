@@ -7,8 +7,7 @@ import (
 
 	"github.com/vango-go/vai-lite/pkg/core"
 	"github.com/vango-go/vai-lite/pkg/core/providers/anthropic"
-	"github.com/vango-go/vai-lite/pkg/core/providers/gemini"
-	"github.com/vango-go/vai-lite/pkg/core/providers/gemini_oauth"
+	"github.com/vango-go/vai-lite/pkg/core/providers/gem"
 	"github.com/vango-go/vai-lite/pkg/core/providers/oai_resp"
 	"github.com/vango-go/vai-lite/pkg/core/providers/openai"
 	"github.com/vango-go/vai-lite/pkg/core/types"
@@ -98,28 +97,16 @@ func FromError(err error, requestID string) (*core.Error, int) {
 		}, statusFromType(core.ErrorType(oaiRespErr.Type))
 	}
 
-	var geminiErr *gemini.Error
-	if errors.As(err, &geminiErr) && geminiErr != nil {
+	var gemErr *gem.Error
+	if errors.As(err, &gemErr) && gemErr != nil {
 		return &core.Error{
-			Type:          core.ErrorType(geminiErr.Type),
-			Message:       geminiErr.Message,
-			Code:          geminiErr.Code,
+			Type:          core.ErrorType(gemErr.Type),
+			Message:       gemErr.Message,
+			Code:          gemErr.Code,
 			RequestID:     requestID,
-			ProviderError: geminiErr.ProviderError,
-			RetryAfter:    geminiErr.RetryAfter,
-		}, statusFromType(core.ErrorType(geminiErr.Type))
-	}
-
-	var geminiOAuthErr *gemini_oauth.Error
-	if errors.As(err, &geminiOAuthErr) && geminiOAuthErr != nil {
-		return &core.Error{
-			Type:          core.ErrorType(geminiOAuthErr.Type),
-			Message:       geminiOAuthErr.Message,
-			Code:          geminiOAuthErr.Code,
-			RequestID:     requestID,
-			ProviderError: geminiOAuthErr.ProviderError,
-			RetryAfter:    geminiOAuthErr.RetryAfter,
-		}, statusFromType(core.ErrorType(geminiOAuthErr.Type))
+			ProviderError: gemErr.ProviderError,
+			RetryAfter:    gemErr.RetryAfter,
+		}, statusFromType(core.ErrorType(gemErr.Type))
 	}
 
 	// Unknown errors: treat as internal API error (do not leak details by default).

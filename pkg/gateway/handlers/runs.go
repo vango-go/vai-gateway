@@ -77,6 +77,15 @@ func (h RunsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeErr(w, reqID, err, false)
 		return
 	}
+	if providerName == "gemini" || providerName == "gemini-oauth" {
+		writeCoreErrorJSON(w, reqID, &core.Error{
+			Type:      core.ErrInvalidRequest,
+			Message:   "provider has been removed; use gem-vert/<model> or gem-dev/<model>",
+			Param:     "request.model",
+			RequestID: reqID,
+		}, http.StatusBadRequest)
+		return
+	}
 	upstreamKeyHeader, ok := compat.ProviderKeyHeader(providerName)
 	if !ok {
 		writeCoreErrorJSON(w, reqID, core.NewInvalidRequestErrorWithParam("unsupported provider", "request.model"), http.StatusBadRequest)

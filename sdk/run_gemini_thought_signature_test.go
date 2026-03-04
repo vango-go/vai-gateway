@@ -2,17 +2,19 @@ package vai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/vango-go/vai-lite/pkg/core"
-	"github.com/vango-go/vai-lite/pkg/core/providers/gemini"
+	"github.com/vango-go/vai-lite/pkg/core/providers/gem"
 )
 
 func TestRun_GeminiThoughtSignaturesPreservedAcrossToolRecursion(t *testing.T) {
@@ -26,7 +28,7 @@ func TestRun_GeminiThoughtSignaturesPreservedAcrossToolRecursion(t *testing.T) {
 	})
 
 	result, err := svc.Run(context.Background(), &MessageRequest{
-		Model: "gemini/gemini-3-flash-preview",
+		Model: "gem-dev/gemini-3-flash-preview",
 		Messages: []Message{
 			{Role: "user", Content: Text("Keep calling do_something many times.")},
 		},
@@ -65,7 +67,7 @@ func TestRunStream_GeminiThoughtSignaturesPreservedAcrossToolRecursion(t *testin
 	defer cancel()
 
 	stream, err := svc.RunStream(ctx, &MessageRequest{
-		Model: "gemini/gemini-3-flash-preview",
+		Model: "gem-dev/gemini-3-flash-preview",
 		Messages: []Message{
 			{Role: "user", Content: Text("Keep calling do_something many times.")},
 		},
@@ -125,42 +127,45 @@ func newGeminiThoughtSignatureServer(t *testing.T) (*geminiThoughtSignatureServe
 	state := &geminiThoughtSignatureServerState{t: t}
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/models/gemini-3-flash-preview:generateContent", func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("failed to read generateContent request body: %v", err)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, ":generateContent"):
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("failed to read generateContent request body: %v", err)
+			}
+
+			if err := validateGeminiThoughtSignatureRequest(body); err != nil {
+				writeGeminiInvalidArgument(w, err)
+				return
+			}
+
+			state.mu.Lock()
+			state.createCalls++
+			call := state.createCalls
+			state.mu.Unlock()
+
+			writeGeminiFunctionCallJSON(w, fmt.Sprintf("sig-%d", call))
+		case strings.HasSuffix(r.URL.Path, ":streamGenerateContent"):
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("failed to read streamGenerateContent request body: %v", err)
+			}
+
+			if err := validateGeminiThoughtSignatureRequest(body); err != nil {
+				writeGeminiInvalidArgument(w, err)
+				return
+			}
+
+			state.mu.Lock()
+			state.streamCalls++
+			call := state.streamCalls
+			state.mu.Unlock()
+
+			writeGeminiFunctionCallSSE(w, fmt.Sprintf("sig-%d", call))
+		default:
+			http.NotFound(w, r)
 		}
-
-		if err := validateGeminiThoughtSignatureRequest(body); err != nil {
-			writeGeminiInvalidArgument(w, err)
-			return
-		}
-
-		state.mu.Lock()
-		state.createCalls++
-		call := state.createCalls
-		state.mu.Unlock()
-
-		writeGeminiFunctionCallJSON(w, fmt.Sprintf("sig-%d", call))
-	})
-
-	mux.HandleFunc("/models/gemini-3-flash-preview:streamGenerateContent", func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Fatalf("failed to read streamGenerateContent request body: %v", err)
-		}
-
-		if err := validateGeminiThoughtSignatureRequest(body); err != nil {
-			writeGeminiInvalidArgument(w, err)
-			return
-		}
-
-		state.mu.Lock()
-		state.streamCalls++
-		call := state.streamCalls
-		state.mu.Unlock()
-
-		writeGeminiFunctionCallSSE(w, fmt.Sprintf("sig-%d", call))
 	})
 
 	return state, httptest.NewServer(mux)
@@ -168,8 +173,8 @@ func newGeminiThoughtSignatureServer(t *testing.T) (*geminiThoughtSignatureServe
 
 func newMessagesServiceForGeminiProviderTest(srv *httptest.Server) *MessagesService {
 	engine := core.NewEngine(nil)
-	provider := gemini.New("test-key", gemini.WithBaseURL(srv.URL), gemini.WithHTTPClient(srv.Client()))
-	engine.RegisterProvider(newGeminiAdapter(provider))
+	provider := gem.NewDeveloper("test-key", gem.WithBaseURL(srv.URL), gem.WithHTTPClient(srv.Client()))
+	engine.RegisterProvider(newGemAdapter(provider))
 	client := &Client{core: engine}
 	return &MessagesService{client: client}
 }
@@ -219,6 +224,7 @@ func writeGeminiInvalidArgument(w http.ResponseWriter, err error) {
 }
 
 func writeGeminiFunctionCallJSON(w http.ResponseWriter, signature string) {
+	encodedSig := base64.StdEncoding.EncodeToString([]byte(signature))
 	resp := map[string]any{
 		"candidates": []any{
 			map[string]any{
@@ -228,7 +234,7 @@ func writeGeminiFunctionCallJSON(w http.ResponseWriter, signature string) {
 							"functionCall": map[string]any{
 								"name": "do_something",
 							},
-							"thoughtSignature": signature,
+							"thoughtSignature": encodedSig,
 						},
 					},
 				},
@@ -246,6 +252,7 @@ func writeGeminiFunctionCallJSON(w http.ResponseWriter, signature string) {
 }
 
 func writeGeminiFunctionCallSSE(w http.ResponseWriter, signature string) {
+	encodedSig := base64.StdEncoding.EncodeToString([]byte(signature))
 	chunk := map[string]any{
 		"candidates": []any{
 			map[string]any{
@@ -255,7 +262,7 @@ func writeGeminiFunctionCallSSE(w http.ResponseWriter, signature string) {
 							"functionCall": map[string]any{
 								"name": "do_something",
 							},
-							"thoughtSignature": signature,
+							"thoughtSignature": encodedSig,
 						},
 					},
 				},

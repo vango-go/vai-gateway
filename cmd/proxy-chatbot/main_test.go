@@ -173,16 +173,23 @@ func TestCollectProviderKeys_GeminiFallbackToGoogle(t *testing.T) {
 	keys := collectProviderKeys(envMap(map[string]string{
 		"GOOGLE_API_KEY": "google-key",
 	}))
-	if keys["gemini"] != "google-key" {
-		t.Fatalf("gemini key fallback=%q, want %q", keys["gemini"], "google-key")
+	if keys["gem-dev"] != "google-key" {
+		t.Fatalf("gem-dev key fallback=%q, want %q", keys["gem-dev"], "google-key")
 	}
 
 	keys = collectProviderKeys(envMap(map[string]string{
 		"GEMINI_API_KEY": "gemini-key",
 		"GOOGLE_API_KEY": "google-key",
 	}))
-	if keys["gemini"] != "gemini-key" {
-		t.Fatalf("gemini key precedence=%q, want %q", keys["gemini"], "gemini-key")
+	if keys["gem-dev"] != "gemini-key" {
+		t.Fatalf("gem-dev key precedence=%q, want %q", keys["gem-dev"], "gemini-key")
+	}
+
+	keys = collectProviderKeys(envMap(map[string]string{
+		"VERTEXAI_API_KEY": "vertex-key",
+	}))
+	if keys["gem-vert"] != "vertex-key" {
+		t.Fatalf("gem-vert key=%q, want %q", keys["gem-vert"], "vertex-key")
 	}
 }
 
@@ -209,7 +216,8 @@ func TestBuildClientOptions_RegistersProviderKeys(t *testing.T) {
 		ProviderKeys: map[string]string{
 			"openai":    "sk-openai-test",
 			"anthropic": "sk-ant-test",
-			"gemini":    "sk-gemini-test",
+			"gem-dev":   "sk-gem-dev-test",
+			"gem-vert":  "sk-gem-vert-test",
 		},
 	})
 	client := vai.NewClient(opts...)
@@ -220,8 +228,11 @@ func TestBuildClientOptions_RegistersProviderKeys(t *testing.T) {
 	if got := client.Engine().GetAPIKey("anthropic"); got != "sk-ant-test" {
 		t.Fatalf("anthropic key=%q", got)
 	}
-	if got := client.Engine().GetAPIKey("gemini"); got != "sk-gemini-test" {
-		t.Fatalf("gemini key=%q", got)
+	if got := client.Engine().GetAPIKey("gem-dev"); got != "sk-gem-dev-test" {
+		t.Fatalf("gem-dev key=%q", got)
+	}
+	if got := client.Engine().GetAPIKey("gem-vert"); got != "sk-gem-vert-test" {
+		t.Fatalf("gem-vert key=%q", got)
 	}
 }
 

@@ -43,7 +43,7 @@ var providerPolicies = map[string]providerPolicy{
 		Thinking:     SupportSupported,
 		OutputFormat: SupportSupported,
 	},
-	"gemini": {
+	"gem-dev": {
 		UnsupportedBlocks: setOf("server_tool_use", "web_search_tool_result"),
 		UnsupportedTools: setOf(
 			types.ToolTypeWebFetch,
@@ -54,7 +54,7 @@ var providerPolicies = map[string]providerPolicy{
 		Thinking:     SupportSupported,
 		OutputFormat: SupportSupported,
 	},
-	"gemini-oauth": {
+	"gem-vert": {
 		UnsupportedBlocks: setOf("server_tool_use", "web_search_tool_result"),
 		UnsupportedTools: setOf(
 			types.ToolTypeWebFetch,

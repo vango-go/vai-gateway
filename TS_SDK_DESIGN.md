@@ -62,7 +62,8 @@ const vai = new VAI({
   providerKeys: {
     anthropic: "sk-ant-...",
     openai: "sk-...",
-    gemini: "...",
+    "gem-dev": "...",
+    "gem-vert": "...",
   },
   defaultModel: "anthropic/claude-sonnet-4",
 });
@@ -75,7 +76,8 @@ type ProviderName =
   | "anthropic"
   | "openai"
   | "oai-resp"
-  | "gemini"
+  | "gem-dev"
+  | "gem-vert"
   | "groq"
   | "cerebras"
   | "openrouter";
@@ -414,4 +416,3 @@ To make the SDK compelling, ship examples:
    - run against a mock server that emits known event sequences
 3. Live WS tests:
    - handshake, binary audio frame path, backpressure signaling
-
