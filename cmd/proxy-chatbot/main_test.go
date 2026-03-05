@@ -54,6 +54,9 @@ func TestParseChatConfig_DefaultsAndEnv(t *testing.T) {
 	if cfg.ProviderKeys["tavily"] != "tvly-test" {
 		t.Fatalf("ProviderKeys[tavily]=%q, want %q", cfg.ProviderKeys["tavily"], "tvly-test")
 	}
+	if cfg.LiveOutputRate != defaultLiveOutputRate {
+		t.Fatalf("LiveOutputRate=%q, want %q", cfg.LiveOutputRate, defaultLiveOutputRate)
+	}
 }
 
 func TestParseChatConfig_MissingOpenAIKey(t *testing.T) {
@@ -113,6 +116,40 @@ func TestParseChatConfig_ModelAndBaseURLValidation(t *testing.T) {
 	}))
 	if err == nil || !strings.Contains(err.Error(), "invalid model") {
 		t.Fatalf("expected invalid model error, got %v", err)
+	}
+}
+
+func TestParseChatConfig_LiveOutputRateValidation(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseChatConfig([]string{"--live-output-rate", "16000"}, envMap(map[string]string{
+		"OPENAI_API_KEY": "sk-openai-test",
+		"TAVILY_API_KEY": "tvly-test",
+	}))
+	if err != nil {
+		t.Fatalf("parseChatConfig error: %v", err)
+	}
+	if cfg.LiveOutputRate != "16000" {
+		t.Fatalf("LiveOutputRate=%q, want %q", cfg.LiveOutputRate, "16000")
+	}
+
+	_, err = parseChatConfig([]string{"--live-output-rate", "12345"}, envMap(map[string]string{
+		"OPENAI_API_KEY": "sk-openai-test",
+		"TAVILY_API_KEY": "tvly-test",
+	}))
+	if err == nil || !strings.Contains(err.Error(), "live-output-rate must be one of: auto, 16000, 8000, 24000") {
+		t.Fatalf("expected live-output-rate validation error, got %v", err)
+	}
+
+	cfg, err = parseChatConfig([]string{"--live-output-rate", "24000"}, envMap(map[string]string{
+		"OPENAI_API_KEY": "sk-openai-test",
+		"TAVILY_API_KEY": "tvly-test",
+	}))
+	if err != nil {
+		t.Fatalf("parseChatConfig error: %v", err)
+	}
+	if cfg.LiveOutputRate != "24000" {
+		t.Fatalf("LiveOutputRate=%q, want %q", cfg.LiveOutputRate, "24000")
 	}
 }
 

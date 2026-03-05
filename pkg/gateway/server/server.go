@@ -97,6 +97,14 @@ func (s *Server) routes() {
 		Lifecycle:  s.lifecycle,
 		Stream:     true,
 	})
+	s.mux.Handle("/v1/live", handlers.LiveHandler{
+		Config:     s.cfg,
+		Upstreams:  s.upstreams,
+		HTTPClient: s.httpClient,
+		Logger:     s.logger,
+		Limiter:    s.limiter,
+		Lifecycle:  s.lifecycle,
+	})
 	s.mux.Handle("/v1/server-tools:execute", handlers.ServerToolsHandler{
 		Config:     s.cfg,
 		HTTPClient: s.httpClient,

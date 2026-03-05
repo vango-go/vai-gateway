@@ -18,10 +18,11 @@ import (
 )
 
 const (
-	defaultBaseURL   = "http://127.0.0.1:8080"
-	defaultModel     = "oai-resp/gpt-5-mini"
-	defaultMaxTokens = 512
-	defaultTimeout   = 300 * time.Second
+	defaultBaseURL        = "http://127.0.0.1:8080"
+	defaultModel          = "oai-resp/gpt-5-mini"
+	defaultMaxTokens      = 512
+	defaultTimeout        = 300 * time.Second
+	defaultLiveOutputRate = "auto"
 )
 
 const talkToUserSystemInstruction = `You must use the talk_to_user tool for any user-facing speech.
@@ -30,15 +31,16 @@ You may use other tools (e.g. web tools) first, then talk_to_user to present res
 Do not duplicate the same spoken content as plain assistant text.`
 
 type chatConfig struct {
-	BaseURL       string
-	Model         string
-	MaxTokens     int
-	Timeout       time.Duration
-	SystemPrompt  string
-	GatewayAPIKey string
-	ProviderKeys  map[string]string
-	VoiceEnabled  bool
-	VoiceID       string
+	BaseURL        string
+	Model          string
+	MaxTokens      int
+	Timeout        time.Duration
+	SystemPrompt   string
+	GatewayAPIKey  string
+	ProviderKeys   map[string]string
+	VoiceEnabled   bool
+	VoiceID        string
+	LiveOutputRate string
 }
 
 type streamPrintState struct {
@@ -79,6 +81,7 @@ func parseChatConfig(args []string, getenv func(string) string) (chatConfig, err
 	fs.StringVar(&cfg.GatewayAPIKey, "gateway-api-key", strings.TrimSpace(getenv("VAI_GATEWAY_API_KEY")), "optional gateway api key (or VAI_GATEWAY_API_KEY)")
 	fs.BoolVar(&cfg.VoiceEnabled, "voice", false, "enable voice output (TTS via gateway)")
 	fs.StringVar(&cfg.VoiceID, "voice-id", "a167e0f3-df7e-4d52-a9c3-f949145efdab", "Cartesia voice ID for TTS")
+	fs.StringVar(&cfg.LiveOutputRate, "live-output-rate", defaultLiveOutputRate, "live mode output sample rate: auto, 16000, 8000, or 24000")
 
 	if err := fs.Parse(args); err != nil {
 		return chatConfig{}, err
@@ -200,7 +203,11 @@ func canonicalizeAndValidateChatConfig(cfg chatConfig) (chatConfig, error) {
 	cfg.Model = strings.TrimSpace(cfg.Model)
 	cfg.SystemPrompt = strings.TrimSpace(cfg.SystemPrompt)
 	cfg.GatewayAPIKey = strings.TrimSpace(cfg.GatewayAPIKey)
+	cfg.LiveOutputRate = strings.ToLower(strings.TrimSpace(cfg.LiveOutputRate))
 	cfg.ProviderKeys = canonicalizeProviderKeys(cfg.ProviderKeys)
+	if cfg.LiveOutputRate == "" {
+		cfg.LiveOutputRate = defaultLiveOutputRate
+	}
 
 	if cfg.BaseURL == "" {
 		return chatConfig{}, errors.New("base-url must not be empty")
@@ -225,6 +232,11 @@ func canonicalizeAndValidateChatConfig(cfg chatConfig) (chatConfig, error) {
 	}
 	if !hasKeyForProvider("tavily", cfg.ProviderKeys) {
 		return chatConfig{}, errors.New("TAVILY_API_KEY is required to enable gateway vai_web_search and vai_web_fetch")
+	}
+	switch cfg.LiveOutputRate {
+	case "auto", "16000", "8000", "24000":
+	default:
+		return chatConfig{}, errors.New("live-output-rate must be one of: auto, 16000, 8000, 24000")
 	}
 	return cfg, nil
 }
@@ -457,7 +469,7 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 		fmt.Fprintln(out, "Tools enabled: talk_to_user, vai_web_search, vai_web_fetch")
 	}
 	if cfg.VoiceEnabled {
-		fmt.Fprintln(out, "Type /exit or /quit to stop. /st to record, /sp to stop & send. /model to view model.")
+		fmt.Fprintln(out, "Type /exit or /quit to stop. /st to record, /sp to stop & send, /live to start live mode, /live off to exit live mode. /model to view model.")
 	} else {
 		fmt.Fprintln(out, "Type /exit or /quit to stop. Use /model to view and /model:{provider}/{model} to switch.")
 	}
@@ -467,16 +479,25 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 		currentModel: cfg.Model,
 		history:      make([]vai.Message, 0, 32),
 	}
+	var liveSession *liveModeSession
 
 	for {
+		maybeCloseFinishedLiveSession(&state, &liveSession, errOut)
 		if state.recorder != nil {
 			fmt.Fprint(out, "[rec] > ")
+		} else if liveSession != nil {
+			fmt.Fprint(out, "[live] > ")
 		} else {
 			fmt.Fprint(out, "> ")
 		}
 		if !scanner.Scan() {
 			if err := scanner.Err(); err != nil {
 				return fmt.Errorf("read input: %w", err)
+			}
+			if liveSession != nil {
+				_ = liveSession.Close()
+				syncHistoryFromLiveSession(&state, liveSession)
+				liveSession = nil
 			}
 			cleanupAudioState(&state)
 			fmt.Fprintln(out)
@@ -489,9 +510,59 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 		}
 		switch line {
 		case "/exit", "/quit":
+			if liveSession != nil {
+				_ = liveSession.Close()
+				syncHistoryFromLiveSession(&state, liveSession)
+				liveSession = nil
+			}
 			cleanupAudioState(&state)
 			fmt.Fprintln(out, "bye")
 			return nil
+		}
+
+		if isLiveModeOnCommand(line) {
+			if liveSession != nil {
+				fmt.Fprintln(errOut, "live mode already active — type /live off to exit")
+				continue
+			}
+			if state.recorder != nil {
+				fmt.Fprintln(errOut, "stop recording first (/sp) before starting live mode")
+				continue
+			}
+			if err := validateModelForLive(state.currentModel, cfg); err != nil {
+				fmt.Fprintf(errOut, "live mode error: %v\n", err)
+				continue
+			}
+			session, err := startLiveModeFunc(ctx, cfg, &state, chatTools, out, errOut)
+			if err != nil {
+				fmt.Fprintf(errOut, "live mode error: %v\n", err)
+				continue
+			}
+			liveSession = session
+			fmt.Fprintln(out, "Live mode active. Speak naturally; type /live off to return.")
+			continue
+		}
+
+		if isLiveModeOffCommand(line) {
+			if liveSession == nil {
+				fmt.Fprintln(errOut, "live mode is not active")
+				continue
+			}
+			_ = liveSession.Close()
+			syncHistoryFromLiveSession(&state, liveSession)
+			liveSession = nil
+			fmt.Fprintln(out, "Live mode stopped.")
+			continue
+		}
+
+		if liveSession != nil {
+			if handled, err := handleSlashCommand(line, &state, cfg, out, errOut); err != nil {
+				return err
+			} else if handled {
+				continue
+			}
+			fmt.Fprintln(errOut, "live mode is active — type /live off to return to typed turns")
+			continue
 		}
 
 		// Recording commands (voice mode only).

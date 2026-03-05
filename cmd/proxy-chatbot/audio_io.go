@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"syscall"
 )
 
@@ -17,14 +18,23 @@ type pcmPlayer struct {
 
 // newPCMPlayer spawns a sox subprocess that reads raw PCM from stdin and plays it.
 func newPCMPlayer() (*pcmPlayer, error) {
+	return newPCMPlayerWithSampleRate(24000)
+}
+
+// newPCMPlayerWithSampleRate spawns a sox subprocess that reads raw PCM from stdin and plays it
+// at the provided sample rate.
+func newPCMPlayerWithSampleRate(sampleRate int) (*pcmPlayer, error) {
+	if sampleRate <= 0 {
+		sampleRate = 24000
+	}
 	cmd := exec.Command("sox",
-		"-q",           // suppress progress bar (avoid terminal noise)
-		"-t", "raw",    // raw PCM input
-		"-r", "24000",  // 24 kHz sample rate
+		"-q",        // suppress progress bar (avoid terminal noise)
+		"-t", "raw", // raw PCM input
+		"-r", strconv.Itoa(sampleRate),
 		"-e", "signed", // signed integer encoding
-		"-b", "16",     // 16-bit samples
-		"-c", "1",      // mono
-		"-", "-d",      // stdin → default audio device
+		"-b", "16", // 16-bit samples
+		"-c", "1", // mono
+		"-", "-d", // stdin → default audio device
 	)
 
 	stdin, err := cmd.StdinPipe()
@@ -81,14 +91,14 @@ type pcmRecorder struct {
 // newPCMRecorder spawns a sox subprocess that records from the mic as raw PCM (16 kHz, 16-bit, mono).
 func newPCMRecorder() (*pcmRecorder, error) {
 	cmd := exec.Command("sox",
-		"-q",           // suppress progress bar (would garble terminal input)
-		"-d",           // default audio input device
-		"-t", "raw",    // raw PCM output
-		"-r", "16000",  // 16 kHz (Cartesia STT default)
+		"-q",        // suppress progress bar (would garble terminal input)
+		"-d",        // default audio input device
+		"-t", "raw", // raw PCM output
+		"-r", "16000", // 16 kHz (Cartesia STT default)
 		"-e", "signed", // signed integer encoding
-		"-b", "16",     // 16-bit samples
-		"-c", "1",      // mono
-		"-",            // output to stdout
+		"-b", "16", // 16-bit samples
+		"-c", "1", // mono
+		"-", // output to stdout
 	)
 
 	stdout, err := cmd.StdoutPipe()

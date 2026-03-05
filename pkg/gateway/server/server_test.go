@@ -99,3 +99,35 @@ func TestServer_RunsRoutes_Reachable(t *testing.T) {
 		}
 	}
 }
+
+func TestServer_LiveRoute_Reachable(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	s := New(config.Config{
+		AuthMode: config.AuthModeDisabled,
+		APIKeys:  map[string]struct{}{},
+
+		CORSAllowedOrigins:            map[string]struct{}{},
+		ModelAllowlist:                map[string]struct{}{},
+		UpstreamConnectTimeout:        time.Second,
+		UpstreamResponseHeaderTimeout: time.Second,
+		WSMaxSessionDuration:          time.Minute,
+		WSMaxSessionsPerPrincipal:     2,
+		TavilyBaseURL:                 "https://api.tavily.com",
+		FirecrawlBaseURL:              "https://api.firecrawl.dev",
+	}, logger)
+
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/v1/live", nil)
+	s.Handler().ServeHTTP(rr, req)
+
+	if rr.Code == http.StatusNotFound {
+		t.Fatalf("path /v1/live unexpectedly returned 404")
+	}
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%q", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), "ws_upgrade_required") {
+		t.Fatalf("unexpected body: %q", rr.Body.String())
+	}
+}
