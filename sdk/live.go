@@ -70,7 +70,9 @@ type LiveSession struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	conn *websocket.Conn
+	conn        *websocket.Conn
+	sendFrameFn func(LiveClientFrame) error
+	sendAudioFn func([]byte) error
 
 	sendMu sync.Mutex
 
@@ -213,6 +215,9 @@ func (s *LiveSession) SendFrame(frame LiveClientFrame) error {
 	if frame == nil {
 		return core.NewInvalidRequestError("frame must not be nil")
 	}
+	if s != nil && s.sendFrameFn != nil {
+		return s.sendFrameFn(frame)
+	}
 	return s.writeJSON(frame)
 }
 
@@ -220,6 +225,9 @@ func (s *LiveSession) SendFrame(frame LiveClientFrame) error {
 func (s *LiveSession) SendAudio(pcm []byte) error {
 	if len(pcm) == 0 {
 		return nil
+	}
+	if s != nil && s.sendAudioFn != nil {
+		return s.sendAudioFn(pcm)
 	}
 	return s.writeBinary(pcm)
 }

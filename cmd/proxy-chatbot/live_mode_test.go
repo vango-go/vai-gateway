@@ -283,8 +283,6 @@ func TestHandleAudioChunk_NonFinalKeepsPlayerOpen(t *testing.T) {
 		ctx:                        ctx,
 		negotiatedOutputSampleRate: 24000,
 		errOut:                     io.Discard,
-		cancelledTurns:             make(map[string]struct{}),
-		audioResetTurns:            make(map[string]struct{}),
 	}
 	session.audioQueueCond = sync.NewCond(&session.audioQueueMu)
 	session.setActiveTurn("turn_1")
@@ -347,8 +345,6 @@ func TestHandleAudioChunk_FinalClosesTurnPlayer(t *testing.T) {
 		ctx:                        ctx,
 		negotiatedOutputSampleRate: 24000,
 		errOut:                     io.Discard,
-		cancelledTurns:             make(map[string]struct{}),
-		audioResetTurns:            make(map[string]struct{}),
 	}
 	session.audioQueueCond = sync.NewCond(&session.audioQueueMu)
 	session.setActiveTurn("turn_1")
@@ -512,9 +508,8 @@ func TestHandleServerEvent_TurnCancelledFinalizesAndIgnoresLateDeltas(t *testing
 
 	var out bytes.Buffer
 	session := &liveModeSession{
-		out:            &out,
-		errOut:         io.Discard,
-		cancelledTurns: make(map[string]struct{}),
+		out:    &out,
+		errOut: io.Discard,
 	}
 	session.audioMu.Lock()
 	session.player = &pcmPlayer{}
@@ -523,6 +518,7 @@ func TestHandleServerEvent_TurnCancelledFinalizesAndIgnoresLateDeltas(t *testing
 	session.audioMu.Unlock()
 	session.setActiveTurn("turn_1")
 
+	session.observeTurnEvent(vai.LiveTurnCancelledEvent{Type: "turn_cancelled", TurnID: "turn_1", Reason: "grace_period"})
 	if err := session.handleServerEvent(vai.LiveTurnCancelledEvent{Type: "turn_cancelled", TurnID: "turn_1", Reason: "grace_period"}); err != nil {
 		t.Fatalf("handleServerEvent(turn_cancelled) error: %v", err)
 	}
@@ -547,9 +543,8 @@ func TestHandleServerEvent_TurnCancelledFinalizesAndIgnoresLateDeltas(t *testing
 func TestHandleServerEvent_IgnoresOlderTurnDeltas(t *testing.T) {
 	var out bytes.Buffer
 	session := &liveModeSession{
-		out:            &out,
-		errOut:         io.Discard,
-		cancelledTurns: make(map[string]struct{}),
+		out:    &out,
+		errOut: io.Discard,
 	}
 	session.setActiveTurn("turn_2")
 
@@ -571,9 +566,8 @@ func TestHandleServerEvent_IgnoresOlderTurnDeltas(t *testing.T) {
 func TestHandleServerEvent_ToolCallPrintsExecutionMarker(t *testing.T) {
 	var out bytes.Buffer
 	session := &liveModeSession{
-		out:            &out,
-		errOut:         io.Discard,
-		cancelledTurns: make(map[string]struct{}),
+		out:    &out,
+		errOut: io.Discard,
 	}
 
 	session.writeAssistantDelta("hello")
@@ -596,67 +590,33 @@ func TestHandleServerEvent_ToolCallPrintsExecutionMarker(t *testing.T) {
 	}
 }
 
-func TestFinalizeTurnAudio_SendsPlaybackStopped(t *testing.T) {
+func TestFinalizeTurnAudio_ClosesPlayerAndClearsTurnState(t *testing.T) {
 	oldClose := closePCMPlayerFunc
 	t.Cleanup(func() { closePCMPlayerFunc = oldClose })
 	closePCMPlayerFunc = func(p *pcmPlayer) error { return nil }
 
-	received := make(chan types.LiveClientFrame, 2)
-
 	session := &liveModeSession{
-		ctx:             context.Background(),
-		sendFrame:       func(frame types.LiveClientFrame) error { received <- frame; return nil },
-		player:          &pcmPlayer{},
-		turnAudioOpen:   true,
-		out:             io.Discard,
-		errOut:          io.Discard,
-		cancelledTurns:  make(map[string]struct{}),
-		audioResetTurns: make(map[string]struct{}),
+		ctx:           context.Background(),
+		player:        &pcmPlayer{},
+		turnAudioOpen: true,
+		out:           io.Discard,
+		errOut:        io.Discard,
 	}
-	session.setAudioTurn("turn_42")
-	session.playbackMarkTurnID = "turn_42"
-	session.playbackMarkRateHz = 16000
-	session.playbackMarkStart = time.Now().Add(-500 * time.Millisecond)
-	session.playbackMarkBytesPCM = int64(16000 * 2) // 1s buffered
-	session.playbackMarkLastSent = -1
-	session.finalizeTurnAudio("test close", "stopped")
+	session.finalizeTurnAudio("test close", vai.LivePlaybackStateStopped)
 
-	select {
-	case frame := <-received:
-		mark, ok := frame.(types.LivePlaybackMarkFrame)
-		if !ok {
-			t.Fatalf("frame=%T, want types.LivePlaybackMarkFrame", frame)
-		}
-		if mark.Type != "playback_mark" {
-			t.Fatalf("type=%q, want playback_mark", mark.Type)
-		}
-		if mark.TurnID != "turn_42" {
-			t.Fatalf("turn_id=%q, want turn_42", mark.TurnID)
-		}
-		if mark.PlayedMS < 0 {
-			t.Fatalf("played_ms=%d, want >= 0", mark.PlayedMS)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for playback_mark frame")
+	session.audioMu.Lock()
+	player := session.player
+	turnAudioOpen := session.turnAudioOpen
+	playerRate := session.playerRate
+	session.audioMu.Unlock()
+	if player != nil {
+		t.Fatal("expected player to be cleared")
 	}
-
-	select {
-	case raw := <-received:
-		frame, ok := raw.(types.LivePlaybackStateFrame)
-		if !ok {
-			t.Fatalf("frame=%T, want types.LivePlaybackStateFrame", raw)
-		}
-		if frame.Type != "playback_state" {
-			t.Fatalf("type=%q, want playback_state", frame.Type)
-		}
-		if frame.TurnID != "turn_42" {
-			t.Fatalf("turn_id=%q, want turn_42", frame.TurnID)
-		}
-		if frame.State != "stopped" {
-			t.Fatalf("state=%q, want stopped", frame.State)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for playback_state frame")
+	if turnAudioOpen {
+		t.Fatal("expected turn audio to be closed")
+	}
+	if playerRate != 0 {
+		t.Fatalf("playerRate=%d, want 0", playerRate)
 	}
 }
 
@@ -680,11 +640,9 @@ func TestHandleServerEvent_AudioResetKillsPlayerAndAllowsTurnComplete(t *testing
 	}
 
 	session := &liveModeSession{
-		ctx:             context.Background(),
-		out:             io.Discard,
-		errOut:          io.Discard,
-		cancelledTurns:  make(map[string]struct{}),
-		audioResetTurns: make(map[string]struct{}),
+		ctx:    context.Background(),
+		out:    io.Discard,
+		errOut: io.Discard,
 	}
 	session.audioMu.Lock()
 	session.player = &pcmPlayer{}
@@ -692,8 +650,8 @@ func TestHandleServerEvent_AudioResetKillsPlayerAndAllowsTurnComplete(t *testing
 	session.turnAudioOpen = true
 	session.audioMu.Unlock()
 	session.setActiveTurn("turn_1")
-	session.setAudioTurn("turn_1")
 
+	session.observeTurnEvent(vai.LiveAudioResetEvent{Type: "audio_reset", TurnID: "turn_1", Reason: "barge_in"})
 	if err := session.handleServerEvent(vai.LiveAudioResetEvent{Type: "audio_reset", TurnID: "turn_1", Reason: "barge_in"}); err != nil {
 		t.Fatalf("handleServerEvent(audio_reset) error: %v", err)
 	}
@@ -743,56 +701,4 @@ func TestHandleServerEvent_AudioResetKillsPlayerAndAllowsTurnComplete(t *testing
 	if len(history) != 1 || history[0].TextContent() != "ok" {
 		t.Fatalf("history not updated after turn_complete: %#v", history)
 	}
-}
-
-func TestPlaybackMarkLoop_SendsMonotonicMarks(t *testing.T) {
-	oldInterval := livePlaybackMarkInterval
-	oldMargin := livePlaybackMarkSafetyMargin
-	t.Cleanup(func() {
-		livePlaybackMarkInterval = oldInterval
-		livePlaybackMarkSafetyMargin = oldMargin
-	})
-	livePlaybackMarkInterval = 10 * time.Millisecond
-	livePlaybackMarkSafetyMargin = 0
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	received := make(chan types.LiveClientFrame, 8)
-	session := &liveModeSession{
-		ctx:             ctx,
-		sendFrame:       func(frame types.LiveClientFrame) error { received <- frame; return nil },
-		out:             io.Discard,
-		errOut:          io.Discard,
-		cancelledTurns:  make(map[string]struct{}),
-		audioResetTurns: make(map[string]struct{}),
-	}
-
-	session.ensurePlaybackMarkLoop("turn_1", 16000)
-	session.addPlaybackBytes("turn_1", 16000, int64(16000*2)) // 1s of PCM buffered
-
-	var marks []types.LivePlaybackMarkFrame
-	for len(marks) < 2 {
-		select {
-		case frame := <-received:
-			mark, ok := frame.(types.LivePlaybackMarkFrame)
-			if !ok {
-				t.Fatalf("frame=%T, want types.LivePlaybackMarkFrame", frame)
-			}
-			if mark.Type != "playback_mark" {
-				t.Fatalf("type=%q, want playback_mark", mark.Type)
-			}
-			if mark.TurnID != "turn_1" {
-				t.Fatalf("turn_id=%q, want turn_1", mark.TurnID)
-			}
-			marks = append(marks, mark)
-		case <-time.After(2 * time.Second):
-			t.Fatal("timed out waiting for playback_mark frames")
-		}
-	}
-	if marks[1].PlayedMS <= marks[0].PlayedMS {
-		t.Fatalf("played_ms not monotonic: %d then %d", marks[0].PlayedMS, marks[1].PlayedMS)
-	}
-
-	session.stopPlaybackMarkLoop("turn_1")
 }
