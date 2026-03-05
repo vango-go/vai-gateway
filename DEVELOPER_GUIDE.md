@@ -18,6 +18,8 @@ The high-level primitives are:
 - Gateway server loop:
   - `Runs.Create()` — blocking gateway-side tool loop
   - `Runs.Stream()` — streaming gateway-side tool loop over SSE
+- Live session:
+  - `Live.Connect()` — proxy-only `/v1/live` WebSocket session with typed events, client tool handling, and authoritative history sync
 
 `Run`/`RunStream` are still the core agent APIs; the single-turn methods are useful when you don’t want loop orchestration.
 
@@ -32,7 +34,6 @@ Everything else is in service of these primitives:
 This repo intentionally **does not** include:
 
 - Standalone audio service endpoints (`client.Audio.*`)
-- A first-class public Go SDK client for `/v1/live`
 
 ---
 
@@ -68,7 +69,7 @@ This repo intentionally **does not** include:
   - [9.2 Helper extractors](#92-helper-extractors)
   - [9.3 `RunStream.Process` convenience](#93-runstreamprocess-convenience)
   - [9.4 `Messages.Stream` audio side channel](#94-messagesstream-audio-side-channel)
-  - [9.5 Gateway live mode status](#95-gateway-live-mode-status)
+  - [9.5 Live SDK + event helpers](#95-live-sdk--event-helpers)
 - [10. Errors and Observability](#10-errors-and-observability)
 - [11. Testing and Local Dev](#11-testing-and-local-dev)
   - [11.1 Integration provider filtering + reliability controls](#111-integration-provider-filtering--reliability-controls)
@@ -76,11 +77,13 @@ This repo intentionally **does not** include:
 - [12. Gotchas and Design Notes](#12-gotchas-and-design-notes)
 - [13. Live Audio Mode (Gateway WebSocket)](#13-live-audio-mode-gateway-websocket)
   - [13.1 Current Status](#131-current-status)
-  - [13.2 Startup and Authentication](#132-startup-and-authentication)
-  - [13.3 Client Frames](#133-client-frames)
-  - [13.4 Server Events](#134-server-events)
-  - [13.5 Turn Semantics](#135-turn-semantics)
-  - [13.6 Current Limits and Reference Client](#136-current-limits-and-reference-client)
+  - [13.2 Public SDK Surface](#132-public-sdk-surface)
+  - [13.3 Startup and Authentication](#133-startup-and-authentication)
+  - [13.4 Client Frames](#134-client-frames)
+  - [13.5 Server Events](#135-server-events)
+  - [13.6 Session Processing and Helper Layer](#136-session-processing-and-helper-layer)
+  - [13.7 Turn Semantics](#137-turn-semantics)
+  - [13.8 Current Limits and Reference Client](#138-current-limits-and-reference-client)
 
 ---
 
@@ -96,6 +99,8 @@ Key directories you’ll touch:
   - `sdk/tools.go` — tool builders (`MakeTool`, `ToolSet`, native tool constructors)
   - `sdk/stream.go` — stream wrapper that accumulates final responses
   - `sdk/stream_helpers.go` — helper callbacks + extractor utilities for RunStream events
+  - `sdk/live.go` — proxy-only live session SDK for `/v1/live`
+  - `sdk/live_helpers.go` — reusable client-side live turn tracking and playback reporting helpers
   - `sdk/tool_arg_decoder.go` — incremental decoder for streamed `input_json_delta` string fields (`content` / `message` / `text`)
   - `sdk/errors.go` — SDK error aliases, `TransportError`, and `FormatError(err)` rich rendering
   - `sdk/content.go` — content-block constructors (text/image/video/document/tool_result)
@@ -181,7 +186,8 @@ Proxy mode notes:
 - `Runs.Create` / `Runs.Stream` call gateway server-side loops.
 - Server-side runs reject client function tools (use provider-native tools and/or gateway-managed **server tools** instead).
 - Gateway server tools are enabled via `server_tools` + `server_tool_config` (legacy `builtins` remains accepted as a compatibility alias).
-- The gateway also exposes `GET /v1/live`, but the in-tree Go SDK does not yet provide a public `Client.Live` service. The reference client today is `cmd/proxy-chatbot/live_mode.go`.
+- The gateway also exposes `GET /v1/live`, and the Go SDK provides `Client.Live.Connect(...)` for proxy-mode live sessions.
+- Live sessions use the same `[]vai.Message` history type as `RunStream`, so callers can move between typed/push-to-talk/live modes without a conversion layer.
 - For non-streaming proxy calls, pass request contexts with explicit deadlines in production.
 
 ### 3.1 OpenAI-Compatible Chat Providers
@@ -981,18 +987,27 @@ For single-turn streaming:
 - In proxy mode, gateway-emitted `audio_chunk` events are forwarded through `AudioEvents()`; `audio_unavailable` closes the audio side channel while text streaming continues.
 - TTS streaming errors are fail-fast: stream ends with `Stream.Err()`.
 
-### 9.5 Gateway live mode status
+### 9.5 Live SDK + event helpers
 
-The gateway implements `GET /v1/live`, and the canonical wire types live in `pkg/core/types/live.go`.
+The gateway implements `GET /v1/live`, and the public Go SDK now exposes it as `Client.Live.Connect(...)`.
 
-Current state:
+Important boundaries:
 
-- There is **no** public `Client.Live` service in `sdk/`.
-- The in-repo reference client is `cmd/proxy-chatbot/live_mode.go`.
-- The current protocol is `start` / `session_started`; treat `LIVE_AUDIO_MODE_DESIGN.md` as future-facing design work, not the current wire contract.
-- Live sessions support client function tools over `tool_call` / `tool_result` frames and gateway server tools via `server_tools`.
+- `Messages.RunStream` is still the turn-based API.
+- `Live.Connect` is a long-lived bidirectional session API.
+- Both modes share the same canonical history type: `[]vai.Message`.
+- The raw event streams remain separate (`RunStreamEvent` vs `LiveEvent`), but the callback model intentionally overlaps.
 
-Use Section 13 for the current live protocol. Treat `LIVE_AUDIO_MODE_DESIGN.md` as a design document for possible future evolution, not the current shipped wire contract.
+Live-specific helpers currently in `sdk/`:
+
+- `LiveCallbacks` — callback processor for `LiveSession.Process(...)`
+- `LiveTextDeltaFrom(event)` — extracts assistant text deltas from a `LiveEvent`
+- `LiveAudioChunkFrom(event)` — extracts assistant audio chunks from a `LiveEvent`
+- `LiveTurnCompleteFrom(event)` — extracts authoritative turn-complete history sync events
+- `LiveTurnTracker` — reusable client-side turn suppression helper for stale/cancelled/reset turns
+- `LivePlaybackReporter` — reusable playback mark/state reporting helper
+
+Use Section 13 for the full live SDK and protocol contract. Treat [LIVE_SDK_DX_DESIGN.md](/Users/collinshill/Documents/projects/vai-lite/LIVE_SDK_DX_DESIGN.md) as background design rationale; the code in `sdk/`, `pkg/core/types/live.go`, and `pkg/gateway/handlers/live.go` is the current source of truth.
 
 ---
 
@@ -1207,15 +1222,20 @@ For OpenAI-compatible Chat Completions providers, prefer composing `pkg/core/pro
 
 This section documents the **current** `/v1/live` implementation in:
 
+- `sdk/live.go`
+- `sdk/live_helpers.go`
 - `pkg/core/types/live.go`
 - `pkg/gateway/handlers/live.go`
 - `cmd/proxy-chatbot/live_mode.go` (reference client)
 
-`LIVE_AUDIO_MODE_DESIGN.md` is a design document for a larger future protocol. It does **not** describe the current shipped wire contract.
+`LIVE_SDK_DX_DESIGN.md` is a design document for how this surface was intended to evolve. It is useful context, but the current shipped contract is the implementation above.
 
 ### 13.1 Current Status
 
-Today’s `/v1/live` implementation is a gateway feature, not a public Go SDK surface.
+Today’s `/v1/live` implementation is both:
+
+- a gateway WebSocket endpoint, and
+- a public proxy-only Go SDK surface via `Client.Live.Connect(...)`
 
 Current behavior:
 
@@ -1226,16 +1246,84 @@ Current behavior:
 - `talk_to_user` is deprecated in live mode and rejected if present as a client function tool or invoked during execution.
 - Client function tools still work over `tool_call` / `tool_result`.
 - Gateway server tools still work via `server_tools` and optional `server_tool_config`.
+- `turn_complete.history` is the authoritative synced conversation history for the session.
 
-### 13.2 Startup and Authentication
+### 13.2 Public SDK Surface
+
+The public Go SDK surface is:
+
+- `client.Live.Connect(ctx, req, opts)`
+- `LiveConnectRequest`
+- `LiveConnectOptions`
+- `LiveSession`
+- `LiveCallbacks`
+- `LiveTurnTracker`
+- `LivePlaybackReporter`
+
+`Client.Live` is initialized by `NewClient(...)` alongside `Messages` and `Runs`.
+
+Current request shape:
+
+```go
+req := &vai.LiveConnectRequest{
+	Request: vai.MessageRequest{
+		Model:    "openai/gpt-4o-mini",
+		Messages: history,
+		Voice: vai.VoiceOutput("voice-id",
+			vai.WithAudioFormat(vai.AudioFormatPCM),
+		),
+	},
+	Run: vai.ServerRunConfig{
+		MaxTurns:      8,
+		MaxToolCalls:  20,
+		ParallelTools: true,
+		ToolTimeoutMS: 30000,
+	},
+	ServerTools: []string{"vai_web_search"},
+}
+
+session, err := client.Live.Connect(ctx, req, &vai.LiveConnectOptions{
+	Tools: []vai.ToolWithHandler{
+		localTool,
+	},
+})
+if err != nil {
+	panic(err)
+}
+defer session.Close()
+```
+
+Important SDK semantics:
+
+- `Live.Connect` is proxy-only and returns an invalid-request error unless `WithBaseURL(...)` is configured.
+- `LiveConnectRequest` is a dedicated public type, but it intentionally mirrors the gateway `run_request` shape.
+- `LiveConnectOptions.Tools` / `ToolHandlers` register local client tool handlers for `tool_call` events.
+- `LiveSession.HistorySnapshot()` returns the latest authoritative history, updated only from `turn_complete.history`.
+- `LiveSession.Close()` sends a best-effort `{"type":"stop"}` before closing the socket.
+- `LiveSession.SendAudio(...)` sends binary PCM frames only.
+
+Mode switching is intentionally cheap:
+
+- `Messages.RunStream` consumes `[]vai.Message`
+- `Live.Connect` consumes `[]vai.Message`
+- `RunStream.Result().Messages` or `LiveSession.HistorySnapshot()` can seed the next mode directly
+
+### 13.3 Startup and Authentication
 
 Authentication and BYOK are provided on the WebSocket upgrade request via headers, not in the first JSON frame.
 
 Current live auth requirements:
 
 - Gateway auth, when enabled: `Authorization: Bearer <gateway key>`
+- SDK/gateway version header: `X-VAI-Version: 1`
 - Upstream model key: provider-specific `X-Provider-Key-*` header matching `run_request.request.model`
 - Voice pipeline key: `X-Provider-Key-Cartesia`
+- Server-tool BYOK headers when used (for example `X-Provider-Key-Tavily`, `X-Provider-Key-Exa`, `X-Provider-Key-Firecrawl`)
+
+`Client.Live.Connect(...)` derives these headers from existing SDK configuration:
+
+- `WithGatewayAPIKey(...)`
+- `WithProviderKey(provider, key)`
 
 Current startup contract:
 
@@ -1281,6 +1369,7 @@ Current startup contract:
   - `48000`
 - `run_request.request.stt_model` defaults to `cartesia/ink-whisper` if omitted.
 - `builtins` is still accepted as a compatibility alias for `server_tools`.
+- The SDK startup path accepts only `session_started` as the first server event; a startup `error` becomes a connect failure.
 
 The gateway replies with:
 
@@ -1295,7 +1384,14 @@ The gateway replies with:
 }
 ```
 
-### 13.3 Client Frames
+The SDK validates the startup contract conservatively:
+
+- input format must be `pcm_s16le`
+- input sample rate must be `16000`
+- output format must be `pcm_s16le`
+- output sample rate must be positive
+
+### 13.4 Client Frames
 
 Current client-to-server traffic is:
 
@@ -1330,8 +1426,14 @@ Notes:
 - `playback_state.state` currently accepts only `finished` or `stopped`.
 - `playback_mark.played_ms` must be non-negative.
 - `tool_result.is_error` and `tool_result.error` are optional and map tool failures back into the live run.
+- The SDK exposes helpers for these frames via:
+  - `LiveSession.SendFrame(...)`
+  - `LiveSession.SendAudio(...)`
+  - `LiveSession.SendToolResult(...)`
+  - `LiveSession.SendPlaybackMark(...)`
+  - `LiveSession.SendPlaybackState(...)`
 
-### 13.4 Server Events
+### 13.5 Server Events
 
 Current server-to-client events are:
 
@@ -1390,8 +1492,51 @@ Notes:
 - `audio_chunk.audio` is base64-encoded PCM payload.
 - `audio_unavailable` is terminal for audio for that turn, but text/history processing can still finish.
 - `turn_complete.history` is the authoritative synced conversation history for the session.
+- `pkg/core/types.UnmarshalLiveServerEvent(...)` and `UnmarshalLiveClientFrame(...)` are the canonical typed JSON decoders for this protocol.
 
-### 13.5 Turn Semantics
+### 13.6 Session Processing and Helper Layer
+
+`LiveSession.Events()` returns typed `LiveEvent` values. `LiveSession.Process(...)` provides callback dispatch similar in spirit to `RunStream.Process(...)`, but for live sessions.
+
+Current live callback surface:
+
+- shared callbacks through embedded `StreamCallbacks`:
+  - `OnTextDelta`
+  - `OnAudioChunk`
+  - `OnAudioUnavailable`
+  - `OnToolCallStart`
+  - `OnToolResult`
+  - `OnError`
+- live-only callbacks:
+  - `OnSessionStarted`
+  - `OnUserTurnCommitted`
+  - `OnTurnComplete`
+  - `OnTurnCancelled`
+  - `OnAudioReset`
+
+Important processing semantics:
+
+- `assistant_text_delta` maps to `OnTextDelta`
+- `audio_chunk` maps to `OnAudioChunk` after base64 decode
+- `tool_call` is auto-executed when a matching handler is registered in `LiveConnectOptions`
+- unknown tools are answered with an error `tool_result` instead of hanging the session
+- `turn_complete` updates internal session history before `HistorySnapshot()` is exposed to callers
+
+The reusable helper layer in `sdk/live_helpers.go` is intentionally composable rather than a full runtime:
+
+- `LiveTurnTracker`
+  - tracks the current active turn
+  - suppresses stale/cancelled/reset streaming events
+  - still allows `turn_complete` after `audio_reset`
+- `LivePlaybackReporter`
+  - tracks one active playback turn at a time
+  - schedules periodic `playback_mark` frames
+  - sends final `playback_state=finished|stopped`
+  - supports `ClearTurn()` for local hard-cut barge-in without claiming playback stopped/finished
+
+These helpers are intended for clients that want `RunStream`-like reuse across live apps without pushing device I/O into the SDK.
+
+### 13.7 Turn Semantics
 
 Current live turn behavior in the gateway:
 
@@ -1403,27 +1548,30 @@ Current live turn behavior in the gateway:
 - If the user barges in while assistant audio is playing, the gateway emits `audio_reset`, cancels the active turn, and truncates saved assistant history to what was actually played as best it can using playback marks and timestamps.
 - If a selected tool name matches a configured gateway server tool, the gateway executes it itself. Other function tools are sent back to the client via `tool_call`.
 
-### 13.6 Current Limits and Reference Client
+On the client side, the demo now splits responsibilities this way:
+
+- SDK owns session transport, tool execution, typed event decode, turn-state helpers, and playback reporting helpers.
+- The demo owns mic capture, speaker playback, local RMS-based barge-in heuristics, and terminal rendering.
+
+### 13.8 Current Limits and Reference Client
 
 Current implementation limits and defaults:
 
 - Input audio contract is fixed to `pcm_s16le` at `16000 Hz`.
 - Output audio format is fixed to `pcm_s16le`; sample rate is negotiated from the requested voice output sample rate.
 - Live STT/TTS currently depends on Cartesia credentials supplied via `X-Provider-Key-Cartesia`.
-- There is no public Go SDK `Live` service yet.
 
 Gateway configuration relevant to live sessions currently comes from the general WebSocket settings in `pkg/gateway/config/config.go`:
 
 - `VAI_PROXY_WS_MAX_DURATION`
 - `VAI_PROXY_WS_MAX_SESSIONS_PER_PRINCIPAL`
 
-The in-repo reference client is `cmd/proxy-chatbot/live_mode.go`.
+The in-repo reference client is `cmd/proxy-chatbot/live_mode.go`. It is now an SDK consumer rather than its own private live transport implementation.
 
 That client shows the current expected behavior:
 
-- WebSocket URL derivation from `WithBaseURL(...)`
-- upgrade-time auth and BYOK headers
-- `start` frame construction from a `RunRequest`
+- `Client.Live.Connect(...)` usage with shared `[]vai.Message` history
 - binary PCM mic streaming
-- `playback_mark` and `playback_state` reporting
-- client-side handling of `tool_call`, `audio_reset`, `turn_cancelled`, and `turn_complete`
+- `LiveTurnTracker`-backed stale/cancelled/reset turn suppression
+- `LivePlaybackReporter`-backed `playback_mark` / `playback_state` reporting
+- client-side handling of `audio_reset`, `turn_cancelled`, and `turn_complete`
