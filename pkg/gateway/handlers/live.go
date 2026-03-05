@@ -921,6 +921,8 @@ type liveTalkTurnState struct {
 	ttsReady bool
 	ttsErr   bool
 	ttsDone  chan struct{}
+
+	ttsProgressCh chan struct{}
 }
 
 func newLiveTalkTurnState(session *liveSession) *liveTalkTurnState {
@@ -1034,6 +1036,7 @@ func (s *liveTalkTurnState) ensureTTS() error {
 	s.tts = ttsSession
 	s.ttsReady = true
 	s.ttsDone = make(chan struct{})
+	s.ttsProgressCh = make(chan struct{}, 1)
 	go s.forwardTTSAudio()
 	return nil
 }
@@ -1059,6 +1062,7 @@ func (s *liveTalkTurnState) forwardTTSAudio() {
 			Audio:        base64.StdEncoding.EncodeToString(pending),
 			IsFinal:      isFinal,
 		})
+		s.signalTTSProgress()
 		pending = nil
 	}
 	for chunk := range s.tts.Audio() {
@@ -1069,6 +1073,16 @@ func (s *liveTalkTurnState) forwardTTSAudio() {
 		pending = append(pending[:0], chunk...)
 	}
 	flushPending(true)
+}
+
+func (s *liveTalkTurnState) signalTTSProgress() {
+	if s == nil || s.ttsProgressCh == nil {
+		return
+	}
+	select {
+	case s.ttsProgressCh <- struct{}{}:
+	default:
+	}
 }
 
 func (s *liveTalkTurnState) finish() {
@@ -1102,8 +1116,18 @@ func (s *liveTalkTurnState) finish() {
 	}()
 
 	ttsDoneCh := s.ttsDone
+	ttsProgressCh := s.ttsProgressCh
 	timer := time.NewTimer(liveTTSDrainTimeout)
 	defer timer.Stop()
+	resetTimer := func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(liveTTSDrainTimeout)
+	}
 
 	for !flushDone || !audioDone {
 		select {
@@ -1114,6 +1138,10 @@ func (s *liveTalkTurnState) finish() {
 		case <-ttsDoneCh:
 			audioDone = true
 			ttsDoneCh = nil
+		case <-ttsProgressCh:
+			if !audioDone {
+				resetTimer()
+			}
 		case <-timer.C:
 			timeoutMsg := "timed out waiting for TTS completion"
 			switch {

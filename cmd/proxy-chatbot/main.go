@@ -28,7 +28,7 @@ const (
 const talkToUserSystemInstruction = `You must use the talk_to_user tool for any user-facing speech.
 When talking to the user, call talk_to_user with JSON arguments shaped like {"content":"..."}.
 You may use other tools (e.g. web tools) first, then talk_to_user to present results.
-Do not duplicate the same spoken content as plain assistant text.`
+Do not duplicate the same spoken content as plain assistant text. When you see the prior talk_to_user tool calls in your context window, know that those are your prior messages to the user. You CAN still use normal assistant messages, they just won't be shown to the user.`
 
 type chatConfig struct {
 	BaseURL        string

@@ -689,6 +689,69 @@ func TestLiveTalkTurnStateFinish_DrainTimeoutEmitsAudioUnavailable(t *testing.T)
 	}
 }
 
+func TestLiveTalkTurnStateFinish_ProgressKeepsDrainAliveUntilDone(t *testing.T) {
+	oldTimeout := liveTTSDrainTimeout
+	liveTTSDrainTimeout = 30 * time.Millisecond
+	defer func() { liveTTSDrainTimeout = oldTimeout }()
+
+	ttsDone := make(chan struct{})
+	tts := &fakeLiveTTSSession{
+		flushResultCh: make(chan error, 1),
+		closeCalledCh: make(chan struct{}, 1),
+	}
+	tts.flushResultCh <- nil
+
+	session := &liveSession{
+		ctx:    context.Background(),
+		sendCh: make(chan any, 4),
+	}
+	state := &liveTalkTurnState{
+		session:       session,
+		tts:           tts,
+		ttsDone:       ttsDone,
+		ttsProgressCh: make(chan struct{}, 1),
+	}
+
+	finishDone := make(chan struct{})
+	go func() {
+		state.finish()
+		close(finishDone)
+	}()
+
+	progressStop := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(10 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-progressStop:
+				return
+			case <-ticker.C:
+				state.signalTTSProgress()
+			}
+		}
+	}()
+
+	time.Sleep(90 * time.Millisecond)
+	close(progressStop)
+	close(ttsDone)
+
+	select {
+	case <-finishDone:
+	case <-time.After(time.Second):
+		t.Fatal("finish did not return after ttsDone")
+	}
+
+	if got := tts.closeCalls.Load(); got != 1 {
+		t.Fatalf("closeCalls=%d, want 1", got)
+	}
+	select {
+	case raw := <-session.sendCh:
+		t.Fatalf("unexpected event while progress was active: %#v", raw)
+	default:
+	}
+}
+
 func TestLiveTalkTurnStateForwardTTSAudio_EmitsSingleFinalChunk(t *testing.T) {
 	audioCh := make(chan []byte, 4)
 	tts := &fakeLiveTTSSession{audioCh: audioCh}
