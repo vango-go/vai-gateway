@@ -12,8 +12,9 @@ import (
 
 // pcmPlayer pipes raw PCM audio (signed 16-bit LE, mono, 24 kHz) to sox for playback.
 type pcmPlayer struct {
-	cmd   *exec.Cmd
-	stdin io.WriteCloser
+	cmd        *exec.Cmd
+	stdin      io.WriteCloser
+	sampleRate int
 }
 
 // newPCMPlayer spawns a sox subprocess that reads raw PCM from stdin and plays it.
@@ -49,7 +50,7 @@ func newPCMPlayerWithSampleRate(sampleRate int) (*pcmPlayer, error) {
 		return nil, err
 	}
 
-	return &pcmPlayer{cmd: cmd, stdin: stdin}, nil
+	return &pcmPlayer{cmd: cmd, stdin: stdin, sampleRate: sampleRate}, nil
 }
 
 // Write sends PCM bytes to the sox subprocess.
@@ -67,9 +68,13 @@ func (p *pcmPlayer) Close() error {
 		return nil
 	}
 	if p.stdin != nil {
-		// 250ms of silence at 24kHz, 16-bit mono = 12000 bytes of zeros.
+		// 250ms of silence at configured sample rate, 16-bit mono.
 		// Without this, the OS audio buffer may not fully drain before sox exits.
-		silence := make([]byte, 24000/4*2) // 250ms
+		sampleRate := p.sampleRate
+		if sampleRate <= 0 {
+			sampleRate = 24000
+		}
+		silence := make([]byte, (sampleRate/4)*2)
 		p.stdin.Write(silence)
 		p.stdin.Close()
 	}

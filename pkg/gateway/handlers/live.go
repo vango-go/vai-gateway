@@ -40,6 +40,8 @@ const (
 	liveSilenceCommitMS           = 600
 )
 
+var liveTTSDrainTimeout = 10 * time.Second
+
 const liveTalkToUserSystemInstruction = `You must use the talk_to_user tool for any user-facing speech.
 When talking to the user, call talk_to_user with JSON arguments shaped like {"content":"..."}.
 You may use other tools first, then talk_to_user to present results.
@@ -1073,19 +1075,76 @@ func (s *liveTalkTurnState) finish() {
 	if s.tts == nil {
 		return
 	}
-	if !s.ttsErr {
-		if err := s.tts.Flush(); err != nil {
+
+	closeTTS := func(timeout time.Duration) {
+		done := make(chan struct{})
+		go func() {
+			_ = s.tts.Close()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(timeout):
+		}
+	}
+
+	if s.ttsErr {
+		closeTTS(500 * time.Millisecond)
+		return
+	}
+
+	flushDone := false
+	audioDone := s.ttsDone == nil
+	var flushErr error
+	flushResultCh := make(chan error, 1)
+	go func() {
+		flushResultCh <- s.tts.Flush()
+	}()
+
+	ttsDoneCh := s.ttsDone
+	timer := time.NewTimer(liveTTSDrainTimeout)
+	defer timer.Stop()
+
+	for !flushDone || !audioDone {
+		select {
+		case err := <-flushResultCh:
+			flushDone = true
+			flushErr = err
+			flushResultCh = nil
+		case <-ttsDoneCh:
+			audioDone = true
+			ttsDoneCh = nil
+		case <-timer.C:
+			timeoutMsg := "timed out waiting for TTS completion"
+			switch {
+			case !flushDone && !audioDone:
+				timeoutMsg = "timed out waiting for TTS flush and audio drain"
+			case !flushDone:
+				timeoutMsg = "timed out waiting for TTS flush"
+			case !audioDone:
+				timeoutMsg = "timed out waiting for TTS audio drain"
+			}
 			s.session.send(types.LiveAudioUnavailableEvent{
 				Type:    "audio_unavailable",
 				Reason:  "tts_failed",
-				Message: "TTS synthesis failed: " + err.Error(),
+				Message: "TTS synthesis failed: " + timeoutMsg,
 			})
+			closeTTS(500 * time.Millisecond)
+			return
+		case <-s.session.ctx.Done():
+			closeTTS(500 * time.Millisecond)
+			return
 		}
 	}
-	_ = s.tts.Close()
-	if s.ttsDone != nil {
-		<-s.ttsDone
+
+	if flushErr != nil {
+		s.session.send(types.LiveAudioUnavailableEvent{
+			Type:    "audio_unavailable",
+			Reason:  "tts_failed",
+			Message: "TTS synthesis failed: " + flushErr.Error(),
+		})
 	}
+	_ = s.tts.Close()
 }
 
 type liveToolExecutor struct {

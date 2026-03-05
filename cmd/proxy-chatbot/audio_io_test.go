@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 )
@@ -64,5 +65,53 @@ func TestEncodeWAV_Header(t *testing.T) {
 		if wav[44+i] != pcm[i] {
 			t.Fatalf("data mismatch at byte %d: got %d, want %d", i, wav[44+i], pcm[i])
 		}
+	}
+}
+
+type captureWriteCloser struct {
+	bytes.Buffer
+	closed bool
+}
+
+func (c *captureWriteCloser) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestPCMPlayerClose_UsesConfiguredSampleRate(t *testing.T) {
+	tests := []struct {
+		name       string
+		sampleRate int
+		wantBytes  int
+	}{
+		{
+			name:       "24k padding",
+			sampleRate: 24000,
+			wantBytes:  (24000 / 4) * 2,
+		},
+		{
+			name:       "16k padding",
+			sampleRate: 16000,
+			wantBytes:  (16000 / 4) * 2,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stdin := &captureWriteCloser{}
+			player := &pcmPlayer{
+				stdin:      stdin,
+				sampleRate: tc.sampleRate,
+			}
+			if err := player.Close(); err != nil {
+				t.Fatalf("Close() error: %v", err)
+			}
+			if !stdin.closed {
+				t.Fatal("expected stdin to be closed")
+			}
+			if got := stdin.Len(); got != tc.wantBytes {
+				t.Fatalf("silence bytes=%d, want %d", got, tc.wantBytes)
+			}
+		})
 	}
 }

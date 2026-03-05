@@ -63,6 +63,7 @@ type liveModeSession struct {
 	recorder                   *livePCMRecorder
 	player                     *pcmPlayer
 	playerRate                 int
+	turnAudioOpen              bool
 	negotiatedOutputSampleRate int
 	sendMu                     sync.Mutex
 	toolMu                     sync.RWMutex
@@ -565,6 +566,9 @@ func (s *liveModeSession) handleServerEvent(data []byte) error {
 		s.closeOpenLinesLocked()
 		s.audioUnavailableWarned = false
 		s.outputMu.Unlock()
+		if s.turnAudioOpen {
+			s.finalizeTurnAudio("live player close (user_turn_committed)")
+		}
 	case "turn_complete":
 		var ev types.LiveTurnCompleteEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
@@ -574,6 +578,9 @@ func (s *liveModeSession) handleServerEvent(data []byte) error {
 		s.closeOpenLinesLocked()
 		s.audioUnavailableWarned = false
 		s.outputMu.Unlock()
+		if s.turnAudioOpen {
+			s.finalizeTurnAudio("live player close (turn_complete)")
+		}
 		s.updateHistory(ev.History)
 	case "audio_unavailable":
 		var ev types.LiveAudioUnavailableEvent
@@ -581,6 +588,9 @@ func (s *liveModeSession) handleServerEvent(data []byte) error {
 			return fmt.Errorf("decode audio_unavailable: %w", err)
 		}
 		s.writeAudioUnavailable(ev.Reason, ev.Message)
+		if s.turnAudioOpen {
+			s.finalizeTurnAudio("live player close (audio_unavailable)")
+		}
 	case "error":
 		var ev types.LiveErrorEvent
 		if err := json.Unmarshal(data, &ev); err != nil {
@@ -613,6 +623,9 @@ func (s *liveModeSession) handleServerEvent(data []byte) error {
 func (s *liveModeSession) handleAudioChunk(ev types.LiveAudioChunkEvent) {
 	if s == nil {
 		return
+	}
+	if ev.IsFinal {
+		defer s.finalizeTurnAudio("live player close (audio_chunk final)")
 	}
 
 	format := strings.TrimSpace(strings.ToLower(ev.Format))
@@ -652,9 +665,22 @@ func (s *liveModeSession) handleAudioChunk(ev types.LiveAudioChunkEvent) {
 	if len(audioBytes) == 0 {
 		return
 	}
+	s.turnAudioOpen = true
 	if _, err := s.player.Write(audioBytes); err != nil {
 		fmt.Fprintf(s.errOut, "live audio playback warning: %v\n", err)
 	}
+}
+
+func (s *liveModeSession) finalizeTurnAudio(label string) {
+	if s == nil {
+		return
+	}
+	if s.player != nil {
+		closePlayerWithDebug(s.player, label)
+		s.player = nil
+	}
+	s.playerRate = 0
+	s.turnAudioOpen = false
 }
 
 func (s *liveModeSession) handleToolCall(ev types.LiveToolCallEvent) {

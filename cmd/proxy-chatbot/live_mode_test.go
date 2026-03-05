@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -424,5 +425,174 @@ func TestReadLiveSessionStarted_RejectsNonPositiveOutputRate(t *testing.T) {
 	_, err = readLiveSessionStarted(conn)
 	if err == nil || !strings.Contains(err.Error(), "unsupported live output sample rate") {
 		t.Fatalf("expected output sample rate error, got %v", err)
+	}
+}
+
+func TestHandleAudioChunk_NonFinalKeepsPlayerOpen(t *testing.T) {
+	oldClose := closePCMPlayerFunc
+	t.Cleanup(func() { closePCMPlayerFunc = oldClose })
+
+	closeCalls := 0
+	closePCMPlayerFunc = func(p *pcmPlayer) error {
+		closeCalls++
+		return nil
+	}
+
+	session := &liveModeSession{
+		player:                     &pcmPlayer{},
+		playerRate:                 24000,
+		negotiatedOutputSampleRate: 24000,
+		errOut:                     io.Discard,
+	}
+	session.handleAudioChunk(types.LiveAudioChunkEvent{
+		Type:         "audio_chunk",
+		Format:       "pcm_s16le",
+		SampleRateHz: 24000,
+		Audio:        base64.StdEncoding.EncodeToString([]byte{0x01, 0x02, 0x03, 0x04}),
+		IsFinal:      false,
+	})
+
+	if closeCalls != 0 {
+		t.Fatalf("closeCalls=%d, want 0", closeCalls)
+	}
+	if session.player == nil {
+		t.Fatal("expected player to stay open")
+	}
+	if !session.turnAudioOpen {
+		t.Fatal("expected turnAudioOpen=true")
+	}
+}
+
+func TestHandleAudioChunk_FinalClosesTurnPlayer(t *testing.T) {
+	oldClose := closePCMPlayerFunc
+	t.Cleanup(func() { closePCMPlayerFunc = oldClose })
+
+	closeCalls := 0
+	closePCMPlayerFunc = func(p *pcmPlayer) error {
+		closeCalls++
+		return nil
+	}
+
+	session := &liveModeSession{
+		player:                     &pcmPlayer{},
+		playerRate:                 24000,
+		negotiatedOutputSampleRate: 24000,
+		errOut:                     io.Discard,
+	}
+	session.handleAudioChunk(types.LiveAudioChunkEvent{
+		Type:         "audio_chunk",
+		Format:       "pcm_s16le",
+		SampleRateHz: 24000,
+		Audio:        base64.StdEncoding.EncodeToString([]byte{0x01, 0x02}),
+		IsFinal:      true,
+	})
+
+	if closeCalls != 1 {
+		t.Fatalf("closeCalls=%d, want 1", closeCalls)
+	}
+	if session.player != nil {
+		t.Fatal("expected player to be cleared")
+	}
+	if session.playerRate != 0 {
+		t.Fatalf("playerRate=%d, want 0", session.playerRate)
+	}
+	if session.turnAudioOpen {
+		t.Fatal("expected turnAudioOpen=false")
+	}
+}
+
+func TestHandleServerEvent_TurnCompleteFinalizesOpenTurnAudio(t *testing.T) {
+	oldClose := closePCMPlayerFunc
+	t.Cleanup(func() { closePCMPlayerFunc = oldClose })
+
+	closeCalls := 0
+	closePCMPlayerFunc = func(p *pcmPlayer) error {
+		closeCalls++
+		return nil
+	}
+
+	session := &liveModeSession{
+		player:        &pcmPlayer{},
+		playerRate:    24000,
+		turnAudioOpen: true,
+		out:           io.Discard,
+		errOut:        io.Discard,
+	}
+	if err := session.handleServerEvent([]byte(`{"type":"turn_complete","stop_reason":"end_turn","history":[]}`)); err != nil {
+		t.Fatalf("handleServerEvent error: %v", err)
+	}
+
+	if closeCalls != 1 {
+		t.Fatalf("closeCalls=%d, want 1", closeCalls)
+	}
+	if session.player != nil {
+		t.Fatal("expected player to be cleared")
+	}
+	if session.turnAudioOpen {
+		t.Fatal("expected turnAudioOpen=false")
+	}
+}
+
+func TestHandleServerEvent_AudioUnavailableFinalizesOpenTurnAudio(t *testing.T) {
+	oldClose := closePCMPlayerFunc
+	t.Cleanup(func() { closePCMPlayerFunc = oldClose })
+
+	closeCalls := 0
+	closePCMPlayerFunc = func(p *pcmPlayer) error {
+		closeCalls++
+		return nil
+	}
+
+	session := &liveModeSession{
+		player:        &pcmPlayer{},
+		playerRate:    24000,
+		turnAudioOpen: true,
+		out:           io.Discard,
+		errOut:        io.Discard,
+	}
+	if err := session.handleServerEvent([]byte(`{"type":"audio_unavailable","reason":"tts_failed","message":"boom"}`)); err != nil {
+		t.Fatalf("handleServerEvent error: %v", err)
+	}
+
+	if closeCalls != 1 {
+		t.Fatalf("closeCalls=%d, want 1", closeCalls)
+	}
+	if session.player != nil {
+		t.Fatal("expected player to be cleared")
+	}
+	if session.turnAudioOpen {
+		t.Fatal("expected turnAudioOpen=false")
+	}
+}
+
+func TestHandleServerEvent_UserTurnCommittedFinalizesOpenTurnAudio(t *testing.T) {
+	oldClose := closePCMPlayerFunc
+	t.Cleanup(func() { closePCMPlayerFunc = oldClose })
+
+	closeCalls := 0
+	closePCMPlayerFunc = func(p *pcmPlayer) error {
+		closeCalls++
+		return nil
+	}
+
+	session := &liveModeSession{
+		player:        &pcmPlayer{},
+		playerRate:    24000,
+		turnAudioOpen: true,
+		out:           io.Discard,
+		errOut:        io.Discard,
+	}
+	if err := session.handleServerEvent([]byte(`{"type":"user_turn_committed","audio_bytes":1234}`)); err != nil {
+		t.Fatalf("handleServerEvent error: %v", err)
+	}
+
+	if closeCalls != 1 {
+		t.Fatalf("closeCalls=%d, want 1", closeCalls)
+	}
+	if session.player != nil {
+		t.Fatal("expected player to be cleared")
+	}
+	if session.turnAudioOpen {
+		t.Fatal("expected turnAudioOpen=false")
 	}
 }

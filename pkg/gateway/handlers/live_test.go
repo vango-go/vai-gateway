@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,14 @@ type fakeLiveSTTSession struct {
 }
 
 type failingLiveSTTSession struct{}
+
+type fakeLiveTTSSession struct {
+	audioCh       chan []byte
+	flushResultCh chan error
+	flushCalledCh chan struct{}
+	closeCalledCh chan struct{}
+	closeCalls    atomic.Int32
+}
 
 func newFakeLiveSTTSession() *fakeLiveSTTSession {
 	return &fakeLiveSTTSession{transcripts: make(chan stt.TranscriptDelta)}
@@ -53,6 +62,43 @@ func (f failingLiveSTTSession) Transcripts() <-chan stt.TranscriptDelta {
 }
 
 func (f failingLiveSTTSession) Close() error { return nil }
+
+func (f *fakeLiveTTSSession) OnTextDelta(text string) error { return nil }
+
+func (f *fakeLiveTTSSession) Flush() error {
+	if f.flushCalledCh != nil {
+		select {
+		case f.flushCalledCh <- struct{}{}:
+		default:
+		}
+	}
+	if f.flushResultCh != nil {
+		return <-f.flushResultCh
+	}
+	return nil
+}
+
+func (f *fakeLiveTTSSession) Close() error {
+	f.closeCalls.Add(1)
+	if f.closeCalledCh != nil {
+		select {
+		case f.closeCalledCh <- struct{}{}:
+		default:
+		}
+	}
+	return nil
+}
+
+func (f *fakeLiveTTSSession) Audio() <-chan []byte {
+	if f.audioCh == nil {
+		ch := make(chan []byte)
+		close(ch)
+		return ch
+	}
+	return f.audioCh
+}
+
+func (f *fakeLiveTTSSession) Err() error { return nil }
 
 func dialLiveTestConn(t *testing.T, serverURL string, headers http.Header) *websocket.Conn {
 	t.Helper()
@@ -504,5 +550,199 @@ func TestLiveSession_STTFailureCancelsSessionAndDoesNotSpam(t *testing.T) {
 	case raw := <-session.sendCh:
 		t.Fatalf("unexpected extra event after first stt failure: %#v", raw)
 	default:
+	}
+}
+
+func TestLiveTalkTurnStateFinish_WaitsForAudioDrainBeforeClose(t *testing.T) {
+	ttsDone := make(chan struct{})
+	tts := &fakeLiveTTSSession{
+		flushResultCh: make(chan error, 1),
+		flushCalledCh: make(chan struct{}, 1),
+		closeCalledCh: make(chan struct{}, 1),
+	}
+	session := &liveSession{
+		ctx:    context.Background(),
+		sendCh: make(chan any, 4),
+	}
+	state := &liveTalkTurnState{
+		session: session,
+		tts:     tts,
+		ttsDone: ttsDone,
+	}
+
+	finishDone := make(chan struct{})
+	go func() {
+		state.finish()
+		close(finishDone)
+	}()
+
+	select {
+	case <-tts.flushCalledCh:
+	case <-time.After(time.Second):
+		t.Fatal("flush was not called")
+	}
+	tts.flushResultCh <- nil
+
+	select {
+	case <-tts.closeCalledCh:
+		t.Fatal("close called before audio drain completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(ttsDone)
+	select {
+	case <-finishDone:
+	case <-time.After(time.Second):
+		t.Fatal("finish did not return after ttsDone")
+	}
+	if got := tts.closeCalls.Load(); got != 1 {
+		t.Fatalf("closeCalls=%d, want 1", got)
+	}
+}
+
+func TestLiveTalkTurnStateFinish_FlushFailureEmitsAudioUnavailable(t *testing.T) {
+	ttsDone := make(chan struct{})
+	close(ttsDone)
+
+	tts := &fakeLiveTTSSession{
+		flushResultCh: make(chan error, 1),
+		closeCalledCh: make(chan struct{}, 1),
+	}
+	tts.flushResultCh <- errors.New("flush boom")
+
+	session := &liveSession{
+		ctx:    context.Background(),
+		sendCh: make(chan any, 4),
+	}
+	state := &liveTalkTurnState{
+		session: session,
+		tts:     tts,
+		ttsDone: ttsDone,
+	}
+
+	state.finish()
+
+	if got := tts.closeCalls.Load(); got != 1 {
+		t.Fatalf("closeCalls=%d, want 1", got)
+	}
+	select {
+	case raw := <-session.sendCh:
+		ev, ok := raw.(types.LiveAudioUnavailableEvent)
+		if !ok {
+			t.Fatalf("unexpected event type %T", raw)
+		}
+		if ev.Reason != "tts_failed" {
+			t.Fatalf("reason=%q, want tts_failed", ev.Reason)
+		}
+		if !strings.Contains(ev.Message, "flush boom") {
+			t.Fatalf("message=%q, want flush error details", ev.Message)
+		}
+	default:
+		t.Fatal("expected audio_unavailable event on flush failure")
+	}
+}
+
+func TestLiveTalkTurnStateFinish_DrainTimeoutEmitsAudioUnavailable(t *testing.T) {
+	oldTimeout := liveTTSDrainTimeout
+	liveTTSDrainTimeout = 30 * time.Millisecond
+	defer func() { liveTTSDrainTimeout = oldTimeout }()
+
+	tts := &fakeLiveTTSSession{
+		flushResultCh: make(chan error, 1),
+		closeCalledCh: make(chan struct{}, 1),
+	}
+	tts.flushResultCh <- nil
+
+	session := &liveSession{
+		ctx:    context.Background(),
+		sendCh: make(chan any, 4),
+	}
+	state := &liveTalkTurnState{
+		session: session,
+		tts:     tts,
+		ttsDone: make(chan struct{}),
+	}
+
+	start := time.Now()
+	state.finish()
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("finish took too long after drain timeout: %s", elapsed)
+	}
+	if got := tts.closeCalls.Load(); got != 1 {
+		t.Fatalf("closeCalls=%d, want 1", got)
+	}
+
+	select {
+	case raw := <-session.sendCh:
+		ev, ok := raw.(types.LiveAudioUnavailableEvent)
+		if !ok {
+			t.Fatalf("unexpected event type %T", raw)
+		}
+		if ev.Reason != "tts_failed" {
+			t.Fatalf("reason=%q, want tts_failed", ev.Reason)
+		}
+		if !strings.Contains(ev.Message, "timed out waiting for TTS audio drain") {
+			t.Fatalf("message=%q, want drain-timeout hint", ev.Message)
+		}
+	default:
+		t.Fatal("expected audio_unavailable event on drain timeout")
+	}
+}
+
+func TestLiveTalkTurnStateForwardTTSAudio_EmitsSingleFinalChunk(t *testing.T) {
+	audioCh := make(chan []byte, 4)
+	tts := &fakeLiveTTSSession{audioCh: audioCh}
+	session := &liveSession{
+		ctx:    context.Background(),
+		sendCh: make(chan any, 8),
+		controllerCfg: &liveSessionConfig{
+			OutputSampleRateHz: 24000,
+		},
+	}
+	state := &liveTalkTurnState{
+		session: session,
+		tts:     tts,
+		ttsDone: make(chan struct{}),
+	}
+
+	go state.forwardTTSAudio()
+	audioCh <- []byte{0x01, 0x02}
+	audioCh <- []byte{0x03, 0x04}
+	close(audioCh)
+
+	select {
+	case <-state.ttsDone:
+	case <-time.After(time.Second):
+		t.Fatal("forwardTTSAudio did not finish")
+	}
+
+	events := make([]types.LiveAudioChunkEvent, 0, 2)
+	for {
+		select {
+		case raw := <-session.sendCh:
+			ev, ok := raw.(types.LiveAudioChunkEvent)
+			if !ok {
+				t.Fatalf("unexpected event type %T", raw)
+			}
+			events = append(events, ev)
+		default:
+			goto done
+		}
+	}
+done:
+	if len(events) != 2 {
+		t.Fatalf("len(audio events)=%d, want 2", len(events))
+	}
+	finalCount := 0
+	for i, ev := range events {
+		if ev.IsFinal {
+			finalCount++
+			if i != len(events)-1 {
+				t.Fatalf("is_final set on non-terminal chunk at index %d", i)
+			}
+		}
+	}
+	if finalCount != 1 {
+		t.Fatalf("final chunk count=%d, want 1", finalCount)
 	}
 }
