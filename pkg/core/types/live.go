@@ -1,5 +1,11 @@
 package types
 
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
+
 // LiveClientFrame is a marker interface for /v1/live websocket client frames.
 type LiveClientFrame interface {
 	LiveClientFrameType() string
@@ -77,18 +83,7 @@ type LiveAssistantTextDeltaEvent struct {
 
 func (e LiveAssistantTextDeltaEvent) LiveServerEventType() string { return "assistant_text_delta" }
 
-// LiveTalkToUserTextDeltaEvent streams talk_to_user text output.
-type LiveTalkToUserTextDeltaEvent struct {
-	Type   string `json:"type"` // "talk_to_user_text_delta"
-	TurnID string `json:"turn_id,omitempty"`
-	CallID string `json:"call_id,omitempty"`
-	Index  int    `json:"index"`
-	Text   string `json:"text"`
-}
-
-func (e LiveTalkToUserTextDeltaEvent) LiveServerEventType() string { return "talk_to_user_text_delta" }
-
-// LiveAudioChunkEvent streams synthesized audio chunks for talk_to_user output.
+// LiveAudioChunkEvent streams synthesized audio chunks for assistant speech.
 type LiveAudioChunkEvent struct {
 	Type         string `json:"type"` // "audio_chunk"
 	TurnID       string `json:"turn_id,omitempty"`
@@ -168,3 +163,145 @@ type LiveErrorEvent struct {
 }
 
 func (e LiveErrorEvent) LiveServerEventType() string { return "error" }
+
+// UnmarshalLiveClientFrame deserializes a /v1/live client frame from JSON.
+func UnmarshalLiveClientFrame(data []byte) (LiveClientFrame, error) {
+	var typeHolder struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &typeHolder); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(typeHolder.Type) == "" {
+		return nil, fmt.Errorf("missing live client frame type")
+	}
+
+	switch typeHolder.Type {
+	case "start":
+		var frame LiveStartFrame
+		if err := json.Unmarshal(data, &frame); err != nil {
+			return nil, err
+		}
+		return frame, nil
+	case "tool_result":
+		var raw struct {
+			Type        string            `json:"type"`
+			ExecutionID string            `json:"execution_id"`
+			Content     []json.RawMessage `json:"content,omitempty"`
+			IsError     bool              `json:"is_error,omitempty"`
+			Error       any               `json:"error,omitempty"`
+		}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return nil, err
+		}
+		content, err := unmarshalContentBlocks(raw.Content)
+		if err != nil {
+			return nil, err
+		}
+		return LiveToolResultFrame{
+			Type:        raw.Type,
+			ExecutionID: raw.ExecutionID,
+			Content:     content,
+			IsError:     raw.IsError,
+			Error:       raw.Error,
+		}, nil
+	case "stop":
+		var frame LiveStopFrame
+		if err := json.Unmarshal(data, &frame); err != nil {
+			return nil, err
+		}
+		return frame, nil
+	case "playback_state":
+		var frame LivePlaybackStateFrame
+		if err := json.Unmarshal(data, &frame); err != nil {
+			return nil, err
+		}
+		return frame, nil
+	case "playback_mark":
+		var frame LivePlaybackMarkFrame
+		if err := json.Unmarshal(data, &frame); err != nil {
+			return nil, err
+		}
+		return frame, nil
+	default:
+		return nil, fmt.Errorf("unknown live client frame type %q", typeHolder.Type)
+	}
+}
+
+// UnmarshalLiveServerEvent deserializes a /v1/live server event from JSON.
+func UnmarshalLiveServerEvent(data []byte) (LiveServerEvent, error) {
+	var typeHolder struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &typeHolder); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(typeHolder.Type) == "" {
+		return nil, fmt.Errorf("missing live server event type")
+	}
+
+	switch typeHolder.Type {
+	case "session_started":
+		var event LiveSessionStartedEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, err
+		}
+		return event, nil
+	case "assistant_text_delta":
+		var event LiveAssistantTextDeltaEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, err
+		}
+		return event, nil
+	case "audio_chunk":
+		var event LiveAudioChunkEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, err
+		}
+		return event, nil
+	case "tool_call":
+		var event LiveToolCallEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, err
+		}
+		return event, nil
+	case "user_turn_committed":
+		var event LiveUserTurnCommittedEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, err
+		}
+		return event, nil
+	case "turn_complete":
+		var event LiveTurnCompleteEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, err
+		}
+		return event, nil
+	case "audio_unavailable":
+		var event LiveAudioUnavailableEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, err
+		}
+		return event, nil
+	case "audio_reset":
+		var event LiveAudioResetEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, err
+		}
+		return event, nil
+	case "turn_cancelled":
+		var event LiveTurnCancelledEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, err
+		}
+		return event, nil
+	case "error":
+		var event LiveErrorEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, err
+		}
+		return event, nil
+	default:
+		return nil, fmt.Errorf("unknown live server event type %q", typeHolder.Type)
+	}
+}

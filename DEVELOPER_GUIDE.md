@@ -15,9 +15,9 @@ The high-level primitives are:
 - Agent loop:
   - `Messages.Run()` — blocking tool-loop execution
   - `Messages.RunStream()` — streaming tool-loop execution with interrupts/cancel and deterministic history deltas
-- Live mode:
-  - `Live.Connect()` — low-level WebSocket session for `/v1/live`
-  - `Live.RunStream()` — RunStream-like live session wrapper with event mapping and client tool callbacks
+- Gateway server loop:
+  - `Runs.Create()` — blocking gateway-side tool loop
+  - `Runs.Stream()` — streaming gateway-side tool loop over SSE
 
 `Run`/`RunStream` are still the core agent APIs; the single-turn methods are useful when you don’t want loop orchestration.
 
@@ -32,7 +32,7 @@ Everything else is in service of these primitives:
 This repo intentionally **does not** include:
 
 - Standalone audio service endpoints (`client.Audio.*`)
-- Additional gateway SDK surfaces beyond messages + runs + live in this phase
+- A first-class public Go SDK client for `/v1/live`
 
 ---
 
@@ -68,19 +68,19 @@ This repo intentionally **does not** include:
   - [9.2 Helper extractors](#92-helper-extractors)
   - [9.3 `RunStream.Process` convenience](#93-runstreamprocess-convenience)
   - [9.4 `Messages.Stream` audio side channel](#94-messagesstream-audio-side-channel)
-  - [9.5 Live SDK client (`/v1/live`)](#95-live-sdk-client-v1live)
+  - [9.5 Gateway live mode status](#95-gateway-live-mode-status)
 - [10. Errors and Observability](#10-errors-and-observability)
 - [11. Testing and Local Dev](#11-testing-and-local-dev)
   - [11.1 Integration provider filtering + reliability controls](#111-integration-provider-filtering--reliability-controls)
   - [11.2 CI release gate workflow](#112-ci-release-gate-workflow)
 - [12. Gotchas and Design Notes](#12-gotchas-and-design-notes)
 - [13. Live Audio Mode (Gateway WebSocket)](#13-live-audio-mode-gateway-websocket)
-  - [13.1 Goals](#131-goals)
-  - [13.2 Core semantics](#132-core-semantics)
-  - [13.3 `talk_to_user(text)` terminal tool](#133-talk_to_usertext-terminal-tool)
-  - [13.4 Interrupt truncation + played history](#134-interrupt-truncation--played-history)
-  - [13.5 Provider notes (ElevenLabs + Cartesia)](#135-provider-notes-elevenlabs--cartesia)
-  - [13.6 Proposed default settings (subject to tuning)](#136-proposed-default-settings-subject-to-tuning)
+  - [13.1 Current Status](#131-current-status)
+  - [13.2 Startup and Authentication](#132-startup-and-authentication)
+  - [13.3 Client Frames](#133-client-frames)
+  - [13.4 Server Events](#134-server-events)
+  - [13.5 Turn Semantics](#135-turn-semantics)
+  - [13.6 Current Limits and Reference Client](#136-current-limits-and-reference-client)
 
 ---
 
@@ -92,7 +92,6 @@ Key directories you’ll touch:
   - `sdk/client.go` — client construction, mode switch (direct vs proxy), provider registration
   - `sdk/messages.go` — `Create` / `Stream` / `CreateStream` / `Extract` / `Run` / `RunStream`
   - `sdk/runs_service.go` — gateway server-run surface: `Runs.Create` / `Runs.Stream`
-  - `sdk/live.go` — gateway live websocket surface: `Live.Connect` / `Live.RunStream`
   - `sdk/run.go` — the tool loop implementation
   - `sdk/tools.go` — tool builders (`MakeTool`, `ToolSet`, native tool constructors)
   - `sdk/stream.go` — stream wrapper that accumulates final responses
@@ -180,9 +179,9 @@ client := vai.NewClient(
 Proxy mode notes:
 - `Messages.Run` / `Messages.RunStream` remain client-side loops.
 - `Runs.Create` / `Runs.Stream` call gateway server-side loops.
-- `Live.Connect` / `Live.RunStream` call gateway live websocket sessions at `/v1/live`.
 - Server-side runs reject client function tools (use provider-native tools and/or gateway-managed **server tools** instead).
 - Gateway server tools are enabled via `server_tools` + `server_tool_config` (legacy `builtins` remains accepted as a compatibility alias).
+- The gateway also exposes `GET /v1/live`, but the in-tree Go SDK does not yet provide a public `Client.Live` service. The reference client today is `cmd/proxy-chatbot/live_mode.go`.
 - For non-streaming proxy calls, pass request contexts with explicit deadlines in production.
 
 ### 3.1 OpenAI-Compatible Chat Providers
@@ -283,7 +282,7 @@ Notes:
   - a `[]ContentBlock`
 - `vai.Text(...)` returns a `ContentBlock` (a typed block).
 - `vai.Audio(bytes, mediaType)` creates input audio blocks.
-- When `req.Voice.Input` is set, audio blocks are transcribed via Cartesia STT before LLM invocation.
+- `audio_stt` blocks are transcribed via Cartesia STT before LLM invocation.
 - When `req.Voice.Output` is set, output text is synthesized to audio via Cartesia TTS.
 
 ### 5.3 Tools and tool choice
@@ -853,7 +852,7 @@ Current wire contract:
 - Tool provider BYOK headers (examples): `X-Provider-Key-Tavily`, `X-Provider-Key-Exa`, `X-Provider-Key-Firecrawl`.
 - Legacy alias: `builtins` (deprecated) is still accepted; if both are present they must match.
 
-**Important:** the LLM/tool call input must never include API keys. Keys are provided to the gateway via headers (HTTP) or `hello.byok` (Live WebSocket), and the gateway uses them ephemerally.
+**Important:** the LLM/tool call input must never include API keys. Keys are provided to the gateway via request headers (HTTP or WebSocket upgrade) and the gateway uses them ephemerally.
 
 ---
 
@@ -979,61 +978,21 @@ For single-turn streaming:
 - `AudioEvents()` emits synthesized audio chunks when `req.Voice.Output` is set.
 - `Response()` includes a final `audio` content block when synthesis succeeded.
 - If voice output is not enabled, `AudioEvents()` is closed immediately.
+- In proxy mode, gateway-emitted `audio_chunk` events are forwarded through `AudioEvents()`; `audio_unavailable` closes the audio side channel while text streaming continues.
 - TTS streaming errors are fail-fast: stream ends with `Stream.Err()`.
 
-### 9.5 Live SDK client (`/v1/live`)
+### 9.5 Gateway live mode status
 
-`Live.Connect` is the low-level websocket client for gateway live mode.
+The gateway implements `GET /v1/live`, and the canonical wire types live in `pkg/core/types/live.go`.
 
-```go
-session, err := client.Live.Connect(ctx, &vai.LiveConnectRequest{
-	Model: "anthropic/claude-sonnet-4",
-	Voice: vai.LiveVoice{
-		Provider: "cartesia",
-		VoiceID:  "your_voice_id",
-		Language: "en",
-	},
-	Features: vai.LiveFeatures{
-		AudioTransport:         "base64_json",
-		SendPlaybackMarks:      true,
-		WantPartialTranscripts: true,
-		WantAssistantText:      true,
-		WantRunEvents:          true,
-	},
-	Tools: vai.LiveTools{
-		ServerTools: []string{"vai_web_search", "vai_web_fetch"},
-		ServerToolConfig: map[string]any{
-			"vai_web_search": map[string]any{"provider": "tavily"},
-			"vai_web_fetch":  map[string]any{"provider": "tavily", "format": "markdown"},
-		},
-	},
-})
-if err != nil {
-	panic(err)
-}
-defer session.Close()
+Current state:
 
-for ev := range session.Events() {
-	switch e := ev.(type) {
-	case vai.LiveAssistantTextDeltaEvent:
-		fmt.Print(e.Delta)
-	case vai.LiveAssistantAudioChunkEvent:
-		play(e.Data, e.Format)
-	}
-}
-```
+- There is **no** public `Client.Live` service in `sdk/`.
+- The in-repo reference client is `cmd/proxy-chatbot/live_mode.go`.
+- The current protocol is `start` / `session_started`; treat `LIVE_AUDIO_MODE_DESIGN.md` as future-facing design work, not the current wire contract.
+- Live sessions support client function tools over `tool_call` / `tool_result` frames and gateway server tools via `server_tools`.
 
-`Live.RunStream` is the RunStream-like wrapper for live sessions:
-- maps `assistant_text_delta` to `TextDeltaFrom(...)`,
-- maps live audio to `AudioChunkEvent`,
-- forwards gateway `run_event` payloads to SDK `RunStreamEvent` types,
-- executes client function tools over `tool_call` / `tool_result` frames when handlers are provided via `WithTools(...)` / `WithToolHandler(...)`.
-
-Key requirements for live connect:
-- proxy mode (`WithBaseURL(...)`),
-- key for `req.Model` provider,
-- `CARTESIA_API_KEY` (or `WithProviderKey("cartesia", ...)`) for STT,
-- `ELEVENLABS_API_KEY` when `Voice.Provider=="elevenlabs"`.
+Use Section 13 for the current live protocol. Treat `LIVE_AUDIO_MODE_DESIGN.md` as a design document for possible future evolution, not the current shipped wire contract.
 
 ---
 
@@ -1246,215 +1205,225 @@ For OpenAI-compatible Chat Completions providers, prefer composing `pkg/core/pro
 
 ## 13. Live Audio Mode (Gateway WebSocket)
 
-This section documents the Live Audio Mode WebSocket implemented by the gateway handler at `GET /v1/live` (see `pkg/gateway/handlers/live.go` and `pkg/gateway/live/session`).
+This section documents the **current** `/v1/live` implementation in:
 
-Canonical design doc (more detailed): `LIVE_AUDIO_MODE_DESIGN.md`.
+- `pkg/core/types/live.go`
+- `pkg/gateway/handlers/live.go`
+- `cmd/proxy-chatbot/live_mode.go` (reference client)
 
-### 13.1 Goals
+`LIVE_AUDIO_MODE_DESIGN.md` is a design document for a larger future protocol. It does **not** describe the current shipped wire contract.
 
-- One WebSocket connection per end-user session.
-- Client streams mic audio → server runs streaming STT.
-- When the user stops speaking (600ms silence), server commits an utterance and runs an LLM tool loop.
-- The assistant speaks by calling a tool: `talk_to_user(text)`; that text is synthesized via streaming TTS and sent back to the client as audio chunks.
-- The client reports playback progress (`played_ms`) so the gateway can do accurate interrupts and enforce backpressure bounds.
-- Support:
-  - **Grace period** (append-on-resume within 5 seconds)
-  - **Barge-in interrupt** while assistant audio is playing
-  - Buffer flushing / audio reset so audio doesn’t “keep playing” after cancel
-- Design the wire protocol so session resume can be added (even if v1 reconnects as a new session).
+### 13.1 Current Status
 
-### 13.2 Core semantics
+Today’s `/v1/live` implementation is a gateway feature, not a public Go SDK surface.
 
-- **600ms endpointing:** if there is a pause in user speech for `600ms`, the gateway treats the captured speech as a committed utterance and proceeds to STT→LLM.
-- **Grace period (5s):** if the user resumes speaking and produces confirmed speech within `5s` of the end of the last committed utterance, the gateway cancels any in-progress assistant output/run and appends the resumed transcript to the same user turn.
-- **Noise vs real speech:** the gateway must not cancel the assistant due to noise/echo-only activity; it should require “confirmed speech” before cancelling during grace/interrupt detection.
-- **User timestamps:** user messages should carry the timestamp of when the user finished speaking (session-relative `end_ms`).
-- **Timebase:** client timestamps should be session-relative and monotonic (see `LIVE_AUDIO_MODE_DESIGN.md`).
-- **Assistant captions (streaming):** if `hello.features.want_assistant_text=true`, the gateway streams captions via `assistant_text_delta` (append-only) and finalizes with `assistant_text_final`. For early `talk_to_user` streaming, clients should not rely on `assistant_audio_start.text` (it may be omitted/empty) and should instead use the caption events.
+Current behavior:
 
-### 13.2.1 Handshake requirements (v1 / Phase 9B)
+- One WebSocket session handles live mic input, streaming STT, model turns, and streaming TTS output.
+- The first client text frame is `type:"start"` carrying a `run_request`.
+- The gateway responds with `type:"session_started"` describing the negotiated audio contract.
+- Live mode uses normal assistant text as the spoken channel.
+- `talk_to_user` is deprecated in live mode and rejected if present as a client function tool or invoked during execution.
+- Client function tools still work over `tool_call` / `tool_result`.
+- Gateway server tools still work via `server_tools` and optional `server_tool_config`.
 
-The first client frame MUST be `hello` (JSON text). The gateway is strict here and will close the session on invalid shapes.
+### 13.2 Startup and Authentication
 
-Required fields (minimum):
-- `hello.protocol_version="1"`
-- `hello.model` (`provider/model`)
-- `hello.audio_in` must be `pcm_s16le @ 16000 Hz mono`
-- `hello.audio_out` must be `pcm_s16le @ 24000 Hz mono`
-- `hello.voice.voice_id` (provider voice id; meaning depends on `hello.voice.provider`)
-- `hello.voice.provider` must be one of:
-  - `cartesia`
-  - `elevenlabs`
+Authentication and BYOK are provided on the WebSocket upgrade request via headers, not in the first JSON frame.
 
-Credentials (BYOK, in-band in `hello.byok`):
-- LLM provider key is required for the selected `hello.model` provider (for example `anthropic` / `openai` / `gem-dev` / `gem-vert`).
-- Cartesia key is required for STT in v1 (Live STT is Cartesia-only): `hello.byok.cartesia`.
-- If `hello.voice.provider="elevenlabs"`:
-  - `hello.byok.elevenlabs` is required.
-  - `hello.features.send_playback_marks` MUST be `true` (the gateway will not claim correct played-history truncation without marks).
+Current live auth requirements:
 
-Optional feature flags:
-- `hello.features.want_run_events=true` enables server→client `run_event` frames (curated `types.RunStreamEvent` payloads; no provider delta spam).
+- Gateway auth, when enabled: `Authorization: Bearer <gateway key>`
+- Upstream model key: provider-specific `X-Provider-Key-*` header matching `run_request.request.model`
+- Voice pipeline key: `X-Provider-Key-Cartesia`
 
-Example `hello` (Cartesia TTS):
+Current startup contract:
+
+- Client sends a JSON text frame:
+
 ```json
 {
-  "type": "hello",
-  "protocol_version": "1",
-  "model": "anthropic/claude-sonnet-4",
-  "auth": {"mode": "api_key", "gateway_api_key": "vai_sk_..."},
-  "byok": {"anthropic": "sk-ant-...", "cartesia": "sk-car-..."},
-  "audio_in": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1},
-  "audio_out": {"encoding": "pcm_s16le", "sample_rate_hz": 24000, "channels": 1},
-  "voice": {"provider": "cartesia", "voice_id": "cartesia_voice_id", "language": "en"},
-  "features": {"audio_transport": "binary", "want_partial_transcripts": true, "want_assistant_text": true, "client_has_aec": true}
+  "type": "start",
+  "run_request": {
+    "request": {
+      "model": "anthropic/claude-sonnet-4",
+      "messages": [],
+      "max_tokens": 512,
+      "voice": {
+        "output": {
+          "voice": "a167e0f3-df7e-4d52-a9c3-f949145efdab",
+          "format": "pcm",
+          "sample_rate": 16000
+        }
+      }
+    },
+    "run": {
+      "max_turns": 8,
+      "max_tool_calls": 20,
+      "timeout_ms": 60000,
+      "parallel_tools": true,
+      "tool_timeout_ms": 30000
+    },
+    "server_tools": ["vai_web_search"]
+  }
 }
 ```
 
-Example `hello` (ElevenLabs TTS):
+- The gateway validates the embedded `RunRequest` using the same strict request rules as `/v1/runs`.
+- `run_request.request.voice.output.voice` is required.
+- `run_request.request.voice.output.format` defaults to `pcm` if omitted.
+- `run_request.request.voice.output.sample_rate` defaults to `16000` if omitted and must be one of:
+  - `8000`
+  - `16000`
+  - `22050`
+  - `24000`
+  - `44100`
+  - `48000`
+- `run_request.request.stt_model` defaults to `cartesia/ink-whisper` if omitted.
+- `builtins` is still accepted as a compatibility alias for `server_tools`.
+
+The gateway replies with:
+
 ```json
 {
-  "type": "hello",
-  "protocol_version": "1",
-  "model": "anthropic/claude-sonnet-4",
-  "auth": {"mode": "api_key", "gateway_api_key": "vai_sk_..."},
-  "byok": {"anthropic": "sk-ant-...", "cartesia": "sk-car-...", "elevenlabs": "sk-11l-..."},
-  "audio_in": {"encoding": "pcm_s16le", "sample_rate_hz": 16000, "channels": 1},
-  "audio_out": {"encoding": "pcm_s16le", "sample_rate_hz": 24000, "channels": 1},
-  "voice": {"provider": "elevenlabs", "voice_id": "eleven_voice_id", "language": "en"},
-  "features": {"audio_transport": "binary", "send_playback_marks": true, "want_partial_transcripts": true, "want_assistant_text": true, "client_has_aec": true}
+  "type": "session_started",
+  "input_format": "pcm_s16le",
+  "input_sample_rate_hz": 16000,
+  "output_format": "pcm_s16le",
+  "output_sample_rate_hz": 16000,
+  "silence_commit_ms": 900
 }
 ```
 
-### 13.3 `talk_to_user(text)` terminal tool
+### 13.3 Client Frames
 
-Live mode uses a tool to represent “assistant speech”:
+Current client-to-server traffic is:
 
-- Tool name: `talk_to_user`
-- Input: `{ "text": "..." }`
-- The tool handler (gateway-side) is responsible for:
-  - starting a new TTS “context” / speech segment
-  - streaming audio to the client
-  - emitting an `audio_reset` on interrupt/cancel so the client clears buffers immediately
-  - treating `text` as speech-optimized (no markdown; expand numbers/symbols/abbreviations where possible)
+- Binary WebSocket frames:
+  - raw `pcm_s16le` mono audio at `16000 Hz`
+- JSON text frames:
+  - `tool_result`
+  - `playback_mark`
+  - `playback_state`
+  - `stop`
 
-V1 requirement:
-- For live mode, models should be prompted to respond by calling `talk_to_user` (or choose to wait).
-- If the model returns plain text without calling `talk_to_user`, decide a policy:
-  - **strict:** treat as a policy violation and fail the turn (better once prompts are stable)
+Current frame shapes:
 
-Terminal semantics:
-- After `talk_to_user` runs, the live turn is considered complete (no follow-up “assistant text message” turn).
-- A clean way to implement this is a `RunOption` like `WithTerminalTools("talk_to_user")` so the tool loop stops immediately after executing that tool.
+```json
+{"type":"tool_result","execution_id":"exec_1","content":[{"type":"text","text":"done"}]}
+```
 
-Low-latency requirement:
-- The gateway should start speaking as soon as the model begins streaming the `talk_to_user` tool input (do not wait for the tool JSON to fully close). Captions should be streamed in lockstep via `assistant_text_delta` / `assistant_text_final`.
+```json
+{"type":"playback_mark","turn_id":"turn_1","played_ms":320}
+```
 
-### 13.4 Interrupt truncation + played history
+```json
+{"type":"playback_state","turn_id":"turn_1","state":"finished"}
+```
 
-In live audio, the assistant often generates text faster than the user hears it. On barge-in, the gateway should avoid “remembering” words the user never heard.
+```json
+{"type":"stop"}
+```
 
-Design approach:
-- The client periodically reports `played_ms` for the active assistant speech segment (`assistant_audio_id`).
-- The client should also report playback `state` (at least `playing`, `stopped`, and ideally `finished`).
-- After `audio_reset`, the client should emit a final `playback_mark` with `state:"stopped"` quickly (target < 500ms) so truncation is accurate.
-- The gateway maintains a **played-history** view of the conversation (what the user actually heard) and uses `WithBuildTurnMessages` to feed that into the next model turn.
-- If the TTS provider exposes alignment/timestamps, the gateway can truncate the assistant text at the corresponding character/word boundary; otherwise it falls back to coarse truncation (drop the unfinished segment).
-- Backpressure must be bounded: if the client falls behind and unplayed audio grows beyond a threshold, the gateway should stop/close the active speech context and emit `audio_reset{reason:"backpressure"}`.
+Notes:
 
-Implementation notes (current gateway behavior):
-- Playback-mark windowing is enforced only when `hello.features.send_playback_marks=true`.
-- For `voice.provider="elevenlabs"`, marks are required at handshake (so windowing is always enabled).
+- `playback_state.state` currently accepts only `finished` or `stopped`.
+- `playback_mark.played_ms` must be non-negative.
+- `tool_result.is_error` and `tool_result.error` are optional and map tool failures back into the live run.
 
-### 13.5 Provider notes (ElevenLabs + Cartesia)
+### 13.4 Server Events
 
-#### ElevenLabs TTS (multi-context WebSocket)
+Current server-to-client events are:
 
-ElevenLabs provides:
-- per-context synthesis over a single socket (`context_id`)
-- base64 `audio` chunks
-- `alignment` and `normalizedAlignment` when `sync_alignment=true` (character-level timing)
+- `session_started`
+- `assistant_text_delta`
+- `audio_chunk`
+- `tool_call`
+- `user_turn_committed`
+- `turn_complete`
+- `audio_unavailable`
+- `audio_reset`
+- `turn_cancelled`
+- `error`
 
-Gateway notes:
-- The gateway uses one active assistant speech context at a time (even though ElevenLabs can multiplex multiple contexts).
-- When ElevenLabs is selected, `hello_ack.features.supports_alignment=true` and `assistant_audio_chunk(.alignment)` is populated with the gateway’s normalized char alignment shape.
+Representative shapes:
 
-Important casing notes (per their AsyncAPI):
-- Client messages: `context_id` (snake_case)
-- Server messages: `contextId`, `isFinal`, `normalizedAlignment`
+```json
+{"type":"assistant_text_delta","turn_id":"turn_1","text":"Hello"}
+```
 
-#### Cartesia STT (streaming WebSocket)
+```json
+{"type":"audio_chunk","turn_id":"turn_1","format":"pcm_s16le","sample_rate_hz":16000,"audio":"<base64>","is_final":false}
+```
 
-Cartesia STT already exists in-tree and supports a streaming session (`NewStreamingSTT`) where you send PCM chunks and receive transcript deltas.
+```json
+{"type":"tool_call","turn_id":"turn_1","execution_id":"exec_1","name":"lookup_account","input":{"id":"123"}}
+```
 
-For endpointing you can:
-- rely on provider endpointing parameters, or
-- keep STT open and implement 600ms endpointing in the gateway (recommended when you also want semantic “real speech” checks).
+```json
+{"type":"user_turn_committed","turn_id":"turn_1","audio_bytes":16384}
+```
 
-#### Cartesia TTS (WebSocket contexts + continuations)
+```json
+{"type":"turn_complete","turn_id":"turn_1","stop_reason":"end_turn","history":[...]}
+```
 
-Cartesia provides:
-- `context_id` for prosody continuity across multiple transcript submissions
-- `continue:true/false` for streaming transcript input (concatenate verbatim; include spaces yourself)
-- `cancel:true` best-effort cancellation (does not necessarily stop in-flight generation)
-- optional `timestamps` events (word/phoneme timestamps) when enabled
+```json
+{"type":"audio_unavailable","turn_id":"turn_1","reason":"tts_failed","message":"TTS synthesis failed: ..."}
+```
 
-Flush/`flush_id`:
-- `flush_id` is delivered via `flush_done` boundary messages, not on `chunk` audio events.
-- `timestamps` messages do not include `flush_id`; correlation is positional and times are in seconds (multiply by 1000).
+```json
+{"type":"audio_reset","turn_id":"turn_1","reason":"barge_in"}
+```
 
-Because Cartesia cancel may not hard-stop in-flight generation, the gateway must:
-- send `audio_reset` to the client immediately on interrupt, and
-- drop late-arriving chunks locally for the interrupted `context_id`.
+```json
+{"type":"turn_cancelled","turn_id":"turn_1","reason":"grace_period"}
+```
 
-### 13.6 Proposed default settings (subject to tuning)
+```json
+{"type":"error","fatal":false,"message":"...","code":"protocol_error"}
+```
 
-These are *recommended starting points* for a live gateway; validate against real traffic and latency/quality constraints.
+Notes:
 
-#### ElevenLabs (TTS primary)
-- `model_id=eleven_flash_v2_5` (multi-context supported; `eleven_v3` is not available for multi-context)
-- `output_format=pcm_24000`
-- `sync_alignment=true` (for interrupt truncation)
-- `apply_text_normalization=off` (prefer LLM pre-normalization in the `talk_to_user` tool prompt; if not available for your account/model, fall back to `auto` and treat `normalizedAlignment` as canonical)
-- `inactivity_timeout=60` (raise above 20s default to tolerate “thinking time”)
-- Context lifecycle:
-  - initialize context with required single-space `text:" "` (and settings once per context)
-  - stream sentence-ish chunks; set `flush:true` at sentence boundaries / end of segment
-  - on interrupt: `close_context:true` + `audio_reset`
-  - keepalive when needed: send `{"text":"", "context_id":"..."}` periodically
+- `assistant_text_delta` is the text that is also being spoken to the user.
+- `audio_chunk.audio` is base64-encoded PCM payload.
+- `audio_unavailable` is terminal for audio for that turn, but text/history processing can still finish.
+- `turn_complete.history` is the authoritative synced conversation history for the session.
 
-Credential policy:
-- If `hello.voice.provider="elevenlabs"` but no ElevenLabs BYOK credential is provided, the gateway fails fast during the handshake with a clear error. It does not silently fall back.
+### 13.5 Turn Semantics
 
-Operational notes:
-- Prefer `audio_out=pcm_*` for v1 so timing/backpressure math is correct; compressed audio output is possible later but requires `sent_ms` to be computed from decoded PCM duration.
-- Enforce inbound mic limits (frame size/rate); drop with warnings and fail fast on sustained overload.
-- Use an allowlisted tool policy + timeouts so live sessions can’t hang on tools.
+Current live turn behavior in the gateway:
 
-### 13.7 Gateway configuration (live env vars)
+- Mic audio is streamed continuously to Cartesia STT.
+- The gateway commits a user utterance after `900ms` of silence following confirmed speech.
+- After commit, the gateway runs a server-side tool loop using the supplied `RunRequest`.
+- The assistant speaks by emitting normal assistant text, not by calling `talk_to_user`.
+- If the user resumes speaking within the `5s` grace window and the active turn has not progressed too far, the gateway cancels the turn and emits `turn_cancelled`.
+- If the user barges in while assistant audio is playing, the gateway emits `audio_reset`, cancels the active turn, and truncates saved assistant history to what was actually played as best it can using playback marks and timestamps.
+- If a selected tool name matches a configured gateway server tool, the gateway executes it itself. Other function tools are sent back to the client via `tool_call`.
 
-In addition to the base gateway configuration, live mode is controlled by:
-- `VAI_PROXY_LIVE_MAX_UNPLAYED_MS` (default `2500ms`)
-- `VAI_PROXY_LIVE_PLAYBACK_STOP_WAIT_MS` (default `500ms`)
-- `VAI_PROXY_LIVE_TOOL_TIMEOUT` (default `10s`)
-- `VAI_PROXY_LIVE_MAX_TOOL_CALLS_PER_TURN` (default `5`)
-- `VAI_PROXY_LIVE_MAX_MODEL_CALLS_PER_TURN` (default `8`)
-- `VAI_PROXY_LIVE_MAX_BACKPRESSURE_RESETS_PER_MIN` (default `3`)
-- `VAI_PROXY_LIVE_ELEVENLABS_WS_BASE_URL` (default empty; gateway uses built-in ElevenLabs default)
+### 13.6 Current Limits and Reference Client
 
-#### Cartesia (STT default)
-- `model=ink-whisper`
-- audio: `pcm_s16le`, `16000 Hz`, mono
-- send mic frames in ~20ms chunks (≈ 640 bytes at 16kHz PCM16 mono)
-- use a low `min_volume` gate (tune per deployment); consider provider endpointing vs gateway endpointing
+Current implementation limits and defaults:
 
-#### Cartesia (TTS secondary / fallback)
-- `model_id=sonic-3`
-- `output_format.container=raw`, `encoding=pcm_s16le`, `sample_rate=24000`
-- `add_timestamps=true` and `use_normalized_timestamps=true` if you plan to use word-level truncation
-- `max_buffer_delay_ms=200` as a latency/quality tradeoff starting point
-- Lifecycle:
-  - new `context_id` per `talk_to_user` segment
-  - use continuations (`continue:true`) while streaming transcript chunks
-  - end with `continue:false` (empty transcript allowed)
-  - on interrupt: send `cancel:true`, drop late chunks, and emit `audio_reset`
+- Input audio contract is fixed to `pcm_s16le` at `16000 Hz`.
+- Output audio format is fixed to `pcm_s16le`; sample rate is negotiated from the requested voice output sample rate.
+- Live STT/TTS currently depends on Cartesia credentials supplied via `X-Provider-Key-Cartesia`.
+- There is no public Go SDK `Live` service yet.
+
+Gateway configuration relevant to live sessions currently comes from the general WebSocket settings in `pkg/gateway/config/config.go`:
+
+- `VAI_PROXY_WS_MAX_DURATION`
+- `VAI_PROXY_WS_MAX_SESSIONS_PER_PRINCIPAL`
+
+The in-repo reference client is `cmd/proxy-chatbot/live_mode.go`.
+
+That client shows the current expected behavior:
+
+- WebSocket URL derivation from `WithBaseURL(...)`
+- upgrade-time auth and BYOK headers
+- `start` frame construction from a `RunRequest`
+- binary PCM mic streaming
+- `playback_mark` and `playback_state` reporting
+- client-side handling of `tool_call`, `audio_reset`, `turn_cancelled`, and `turn_complete`

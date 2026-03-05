@@ -4,89 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/vango-go/vai-lite/pkg/core/types"
 	vai "github.com/vango-go/vai-lite/sdk"
 )
-
-func TestLiveWebsocketURL(t *testing.T) {
-	tests := []struct {
-		name    string
-		baseURL string
-		want    string
-		wantErr string
-	}{
-		{
-			name:    "http converts to ws",
-			baseURL: "http://127.0.0.1:8080",
-			want:    "ws://127.0.0.1:8080/v1/live",
-		},
-		{
-			name:    "https converts to wss",
-			baseURL: "https://api.example.com/proxy",
-			want:    "wss://api.example.com/proxy/v1/live",
-		},
-		{
-			name:    "unsupported scheme",
-			baseURL: "ftp://example.com",
-			wantErr: "unsupported base-url scheme",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := liveWebsocketURL(tc.baseURL)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("error=%v, want contains %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("liveWebsocketURL error: %v", err)
-			}
-			if got != tc.want {
-				t.Fatalf("url=%q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestBuildLiveWSHeaders_IncludesGatewayAndProviderKeys(t *testing.T) {
-	cfg := chatConfig{
-		GatewayAPIKey: "vai_sk_test",
-		ProviderKeys: map[string]string{
-			"openai":   "sk-openai",
-			"cartesia": "sk-cartesia",
-			"tavily":   "tvly",
-		},
-	}
-
-	headers := buildLiveWSHeaders(cfg)
-	if got := headers.Get("Authorization"); got != "Bearer vai_sk_test" {
-		t.Fatalf("authorization=%q", got)
-	}
-	if got := headers.Get("X-Provider-Key-OpenAI"); got != "sk-openai" {
-		t.Fatalf("openai header=%q", got)
-	}
-	if got := headers.Get("X-Provider-Key-Cartesia"); got != "sk-cartesia" {
-		t.Fatalf("cartesia header=%q", got)
-	}
-	if got := headers.Get("X-Provider-Key-Tavily"); got != "tvly" {
-		t.Fatalf("tavily header=%q", got)
-	}
-}
 
 func TestPartitionLiveTools(t *testing.T) {
 	talkTool := vai.MakeTool("talk_to_user", "talk", func(ctx context.Context, input struct {
@@ -124,66 +51,48 @@ func TestPartitionLiveTools(t *testing.T) {
 	}
 }
 
-func TestBuildLiveStartFrame_ConfiguresRunRequest(t *testing.T) {
+func TestBuildLiveConnectRequest_ConfiguresRunRequest(t *testing.T) {
 	localTool := vai.MakeTool("local_tool", "local", func(ctx context.Context, input struct {
 		Value string `json:"value"`
 	}) (string, error) {
 		return input.Value, nil
 	})
 
-	start, handlers := buildLiveStartFrame(chatConfig{
+	req, opts := buildLiveConnectRequest(chatConfig{
 		MaxTokens:    321,
 		SystemPrompt: "Be concise",
 		VoiceID:      "voice-id",
 	}, "oai-resp/gpt-5-mini", nil, 16000, []vai.ToolWithHandler{vai.VAIWebSearch(vai.Tavily), localTool})
 
-	if start.Type != "start" {
-		t.Fatalf("type=%q, want start", start.Type)
+	if req.Request.Model != "oai-resp/gpt-5-mini" {
+		t.Fatalf("model=%q", req.Request.Model)
 	}
-	if start.RunRequest.Request.Model != "oai-resp/gpt-5-mini" {
-		t.Fatalf("model=%q", start.RunRequest.Request.Model)
+	if req.Request.MaxTokens != 321 {
+		t.Fatalf("max_tokens=%d, want 321", req.Request.MaxTokens)
 	}
-	if start.RunRequest.Request.MaxTokens != 321 {
-		t.Fatalf("max_tokens=%d, want 321", start.RunRequest.Request.MaxTokens)
-	}
-	if start.RunRequest.Request.Voice == nil || start.RunRequest.Request.Voice.Output == nil {
+	if req.Request.Voice == nil || req.Request.Voice.Output == nil {
 		t.Fatal("voice output not configured")
 	}
-	if start.RunRequest.Request.Voice.Output.SampleRate != 16000 {
-		t.Fatalf("sample_rate=%d, want %d", start.RunRequest.Request.Voice.Output.SampleRate, 16000)
+	if req.Request.Voice.Output.SampleRate != 16000 {
+		t.Fatalf("sample_rate=%d, want %d", req.Request.Voice.Output.SampleRate, 16000)
 	}
-	if len(start.RunRequest.ServerTools) != 1 || start.RunRequest.ServerTools[0] != "vai_web_search" {
-		t.Fatalf("server_tools=%v, want [vai_web_search]", start.RunRequest.ServerTools)
+	if len(req.ServerTools) != 1 || req.ServerTools[0] != "vai_web_search" {
+		t.Fatalf("server_tools=%v, want [vai_web_search]", req.ServerTools)
 	}
-	if _, ok := start.RunRequest.ServerToolConfig["vai_web_search"]; !ok {
+	if _, ok := req.ServerToolConfig["vai_web_search"]; !ok {
 		t.Fatalf("missing server_tool_config for vai_web_search")
 	}
-	if len(start.RunRequest.Request.Tools) != 1 || start.RunRequest.Request.Tools[0].Name != "local_tool" {
-		t.Fatalf("request.tools=%v", start.RunRequest.Request.Tools)
+	if len(req.Request.Tools) != 1 || req.Request.Tools[0].Name != "local_tool" {
+		t.Fatalf("request.tools=%v", req.Request.Tools)
 	}
-	if _, ok := handlers["local_tool"]; !ok {
+	if opts == nil || opts.ToolHandlers == nil {
+		t.Fatal("missing live connect options")
+	}
+	if _, ok := opts.ToolHandlers["local_tool"]; !ok {
 		t.Fatalf("missing local_tool handler")
 	}
-	if !strings.Contains(start.RunRequest.Request.System.(string), "talk_to_user") {
-		t.Fatalf("system prompt missing talk_to_user instruction: %v", start.RunRequest.Request.System)
-	}
-}
-
-func TestToolOutputToContentBlocks(t *testing.T) {
-	blocks := toolOutputToContentBlocks("hello")
-	if len(blocks) != 1 {
-		t.Fatalf("len(blocks)=%d, want 1", len(blocks))
-	}
-	if tb, ok := blocks[0].(types.TextBlock); !ok || tb.Text != "hello" {
-		t.Fatalf("unexpected block: %#v", blocks[0])
-	}
-
-	blocks = toolOutputToContentBlocks(map[string]any{"a": 1})
-	if len(blocks) != 1 {
-		t.Fatalf("len(blocks)=%d, want 1", len(blocks))
-	}
-	if tb, ok := blocks[0].(types.TextBlock); !ok || !strings.Contains(tb.Text, `"a":1`) {
-		t.Fatalf("unexpected json block: %#v", blocks[0])
+	if !strings.Contains(req.Request.System.(string), talkToUserSystemInstruction) {
+		t.Fatalf("system prompt missing enforced instruction: %v", req.Request.System)
 	}
 }
 
@@ -354,82 +263,6 @@ func TestLiveRequestedOutputSampleRate(t *testing.T) {
 	}
 }
 
-func TestReadLiveSessionStarted_AcceptsNegotiatedOutputRate(t *testing.T) {
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade websocket: %v", err)
-		}
-		defer conn.Close()
-		if err := conn.WriteJSON(types.LiveSessionStartedEvent{
-			Type:               "session_started",
-			InputFormat:        "pcm_s16le",
-			InputSampleRateHz:  16000,
-			OutputFormat:       "pcm_s16le",
-			OutputSampleRateHz: 16000,
-			SilenceCommitMS:    600,
-		}); err != nil {
-			t.Fatalf("write session_started: %v", err)
-		}
-	}))
-	defer server.Close()
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial websocket: %v", err)
-	}
-	defer conn.Close()
-
-	started, err := readLiveSessionStarted(conn)
-	if err != nil {
-		t.Fatalf("readLiveSessionStarted error: %v", err)
-	}
-	if started.OutputSampleRateHz != 16000 {
-		t.Fatalf("output sample_rate_hz=%d, want 16000", started.OutputSampleRateHz)
-	}
-}
-
-func TestReadLiveSessionStarted_RejectsNonPositiveOutputRate(t *testing.T) {
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true },
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Fatalf("upgrade websocket: %v", err)
-		}
-		defer conn.Close()
-		payload, _ := json.Marshal(types.LiveSessionStartedEvent{
-			Type:               "session_started",
-			InputFormat:        "pcm_s16le",
-			InputSampleRateHz:  16000,
-			OutputFormat:       "pcm_s16le",
-			OutputSampleRateHz: 0,
-			SilenceCommitMS:    600,
-		})
-		if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
-			t.Fatalf("write session_started: %v", err)
-		}
-	}))
-	defer server.Close()
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial websocket: %v", err)
-	}
-	defer conn.Close()
-
-	_, err = readLiveSessionStarted(conn)
-	if err == nil || !strings.Contains(err.Error(), "unsupported live output sample rate") {
-		t.Fatalf("expected output sample rate error, got %v", err)
-	}
-}
-
 func TestHandleAudioChunk_NonFinalKeepsPlayerOpen(t *testing.T) {
 	oldNew := newLivePCMPlayerFunc
 	t.Cleanup(func() { newLivePCMPlayerFunc = oldNew })
@@ -566,7 +399,7 @@ func TestHandleServerEvent_TurnCompleteFinalizesOpenTurnAudio(t *testing.T) {
 	session.playerRate = 24000
 	session.turnAudioOpen = true
 	session.audioMu.Unlock()
-	if err := session.handleServerEvent([]byte(`{"type":"turn_complete","stop_reason":"end_turn","history":[]}`)); err != nil {
+	if err := session.handleServerEvent(vai.LiveTurnCompleteEvent{Type: "turn_complete", StopReason: "end_turn", History: []vai.Message{}}); err != nil {
 		t.Fatalf("handleServerEvent error: %v", err)
 	}
 
@@ -603,7 +436,7 @@ func TestHandleServerEvent_AudioUnavailableFinalizesOpenTurnAudio(t *testing.T) 
 	session.playerRate = 24000
 	session.turnAudioOpen = true
 	session.audioMu.Unlock()
-	if err := session.handleServerEvent([]byte(`{"type":"audio_unavailable","reason":"tts_failed","message":"boom"}`)); err != nil {
+	if err := session.handleServerEvent(vai.LiveAudioUnavailableEvent{Type: "audio_unavailable", Reason: "tts_failed", Message: "boom"}); err != nil {
 		t.Fatalf("handleServerEvent error: %v", err)
 	}
 
@@ -640,7 +473,7 @@ func TestHandleServerEvent_UserTurnCommittedFinalizesOpenTurnAudio(t *testing.T)
 	session.playerRate = 24000
 	session.turnAudioOpen = true
 	session.audioMu.Unlock()
-	if err := session.handleServerEvent([]byte(`{"type":"user_turn_committed","audio_bytes":1234}`)); err != nil {
+	if err := session.handleServerEvent(vai.LiveUserTurnCommittedEvent{Type: "user_turn_committed", AudioBytes: 1234}); err != nil {
 		t.Fatalf("handleServerEvent error: %v", err)
 	}
 
@@ -690,7 +523,7 @@ func TestHandleServerEvent_TurnCancelledFinalizesAndIgnoresLateDeltas(t *testing
 	session.audioMu.Unlock()
 	session.setActiveTurn("turn_1")
 
-	if err := session.handleServerEvent([]byte(`{"type":"turn_cancelled","turn_id":"turn_1","reason":"grace_period"}`)); err != nil {
+	if err := session.handleServerEvent(vai.LiveTurnCancelledEvent{Type: "turn_cancelled", TurnID: "turn_1", Reason: "grace_period"}); err != nil {
 		t.Fatalf("handleServerEvent(turn_cancelled) error: %v", err)
 	}
 	if killCalls != 1 {
@@ -703,7 +536,7 @@ func TestHandleServerEvent_TurnCancelledFinalizesAndIgnoresLateDeltas(t *testing
 		t.Fatal("expected turnAudioOpen=false")
 	}
 
-	if err := session.handleServerEvent([]byte(`{"type":"assistant_text_delta","turn_id":"turn_1","text":"late text"}`)); err != nil {
+	if err := session.handleServerEvent(vai.LiveAssistantTextDeltaEvent{Type: "assistant_text_delta", TurnID: "turn_1", Text: "late text"}); err != nil {
 		t.Fatalf("handleServerEvent(assistant_text_delta) error: %v", err)
 	}
 	if out.String() != "" {
@@ -720,18 +553,46 @@ func TestHandleServerEvent_IgnoresOlderTurnDeltas(t *testing.T) {
 	}
 	session.setActiveTurn("turn_2")
 
-	if err := session.handleServerEvent([]byte(`{"type":"assistant_text_delta","turn_id":"turn_1","text":"old"}`)); err != nil {
+	if err := session.handleServerEvent(vai.LiveAssistantTextDeltaEvent{Type: "assistant_text_delta", TurnID: "turn_1", Text: "old"}); err != nil {
 		t.Fatalf("handleServerEvent(old turn) error: %v", err)
 	}
 	if out.String() != "" {
 		t.Fatalf("expected stale turn delta to be ignored, out=%q", out.String())
 	}
 
-	if err := session.handleServerEvent([]byte(`{"type":"assistant_text_delta","turn_id":"turn_2","text":"new"}`)); err != nil {
+	if err := session.handleServerEvent(vai.LiveAssistantTextDeltaEvent{Type: "assistant_text_delta", TurnID: "turn_2", Text: "new"}); err != nil {
 		t.Fatalf("handleServerEvent(active turn) error: %v", err)
 	}
 	if !strings.Contains(out.String(), "assistant: new") {
 		t.Fatalf("expected active turn delta to render, out=%q", out.String())
+	}
+}
+
+func TestHandleServerEvent_ToolCallPrintsExecutionMarker(t *testing.T) {
+	var out bytes.Buffer
+	session := &liveModeSession{
+		out:            &out,
+		errOut:         io.Discard,
+		cancelledTurns: make(map[string]struct{}),
+	}
+
+	session.writeAssistantDelta("hello")
+	if err := session.handleServerEvent(vai.LiveToolCallEvent{
+		Type:        "tool_call",
+		TurnID:      "turn_1",
+		ExecutionID: "exec_1",
+		Name:        "local_tool",
+		Input:       map[string]any{"value": "x"},
+	}); err != nil {
+		t.Fatalf("handleServerEvent(tool_call) error: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "assistant: hello\n") {
+		t.Fatalf("expected assistant line to be terminated before tool marker, got=%q", got)
+	}
+	if !strings.Contains(got, "[tool] local_tool\n") {
+		t.Fatalf("expected tool execution marker, got=%q", got)
 	}
 }
 
@@ -740,37 +601,11 @@ func TestFinalizeTurnAudio_SendsPlaybackStopped(t *testing.T) {
 	t.Cleanup(func() { closePCMPlayerFunc = oldClose })
 	closePCMPlayerFunc = func(p *pcmPlayer) error { return nil }
 
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	received := make(chan []byte, 2)
-	serverErr := make(chan error, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			serverErr <- fmt.Errorf("upgrade websocket: %w", err)
-			return
-		}
-		defer conn.Close()
-		for i := 0; i < 2; i++ {
-			_, payload, err := conn.ReadMessage()
-			if err != nil {
-				serverErr <- fmt.Errorf("read websocket frame: %w", err)
-				return
-			}
-			received <- payload
-		}
-	}))
-	defer server.Close()
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial websocket: %v", err)
-	}
-	defer conn.Close()
+	received := make(chan types.LiveClientFrame, 2)
 
 	session := &liveModeSession{
 		ctx:             context.Background(),
-		conn:            conn,
+		sendFrame:       func(frame types.LiveClientFrame) error { received <- frame; return nil },
 		player:          &pcmPlayer{},
 		turnAudioOpen:   true,
 		out:             io.Discard,
@@ -786,13 +621,11 @@ func TestFinalizeTurnAudio_SendsPlaybackStopped(t *testing.T) {
 	session.playbackMarkLastSent = -1
 	session.finalizeTurnAudio("test close", "stopped")
 
-	var mark types.LivePlaybackMarkFrame
 	select {
-	case err := <-serverErr:
-		t.Fatalf("server error: %v", err)
-	case payload := <-received:
-		if err := json.Unmarshal(payload, &mark); err != nil {
-			t.Fatalf("decode playback_mark frame: %v", err)
+	case frame := <-received:
+		mark, ok := frame.(types.LivePlaybackMarkFrame)
+		if !ok {
+			t.Fatalf("frame=%T, want types.LivePlaybackMarkFrame", frame)
 		}
 		if mark.Type != "playback_mark" {
 			t.Fatalf("type=%q, want playback_mark", mark.Type)
@@ -808,12 +641,10 @@ func TestFinalizeTurnAudio_SendsPlaybackStopped(t *testing.T) {
 	}
 
 	select {
-	case err := <-serverErr:
-		t.Fatalf("server error: %v", err)
-	case payload := <-received:
-		var frame types.LivePlaybackStateFrame
-		if err := json.Unmarshal(payload, &frame); err != nil {
-			t.Fatalf("decode playback_state frame: %v", err)
+	case raw := <-received:
+		frame, ok := raw.(types.LivePlaybackStateFrame)
+		if !ok {
+			t.Fatalf("frame=%T, want types.LivePlaybackStateFrame", raw)
 		}
 		if frame.Type != "playback_state" {
 			t.Fatalf("type=%q, want playback_state", frame.Type)
@@ -863,7 +694,7 @@ func TestHandleServerEvent_AudioResetKillsPlayerAndAllowsTurnComplete(t *testing
 	session.setActiveTurn("turn_1")
 	session.setAudioTurn("turn_1")
 
-	if err := session.handleServerEvent([]byte(`{"type":"audio_reset","turn_id":"turn_1","reason":"barge_in"}`)); err != nil {
+	if err := session.handleServerEvent(vai.LiveAudioResetEvent{Type: "audio_reset", TurnID: "turn_1", Reason: "barge_in"}); err != nil {
 		t.Fatalf("handleServerEvent(audio_reset) error: %v", err)
 	}
 	if killCalls != 1 {
@@ -883,14 +714,29 @@ func TestHandleServerEvent_AudioResetKillsPlayerAndAllowsTurnComplete(t *testing
 	}
 
 	// Late audio chunks for the reset turn must be ignored.
-	if err := session.handleServerEvent([]byte(`{"type":"audio_chunk","turn_id":"turn_1","format":"pcm_s16le","sample_rate_hz":24000,"audio":"AQI=","is_final":false}`)); err != nil {
+	if err := session.handleServerEvent(vai.LiveAudioChunkEvent{
+		Type:         "audio_chunk",
+		TurnID:       "turn_1",
+		Format:       "pcm_s16le",
+		SampleRateHz: 24000,
+		Audio:        "AQI=",
+		IsFinal:      false,
+	}); err != nil {
 		t.Fatalf("handleServerEvent(audio_chunk) error: %v", err)
 	}
 	if killCalls != 1 {
 		t.Fatalf("killCalls=%d, want 1 after late chunk", killCalls)
 	}
 
-	if err := session.handleServerEvent([]byte(`{"type":"turn_complete","turn_id":"turn_1","stop_reason":"cancelled","history":[{"role":"assistant","content":[{"type":"text","text":"ok"}]}]}`)); err != nil {
+	if err := session.handleServerEvent(vai.LiveTurnCompleteEvent{
+		Type:       "turn_complete",
+		TurnID:     "turn_1",
+		StopReason: "cancelled",
+		History: []vai.Message{{
+			Role:    "assistant",
+			Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "ok"}},
+		}},
+	}); err != nil {
 		t.Fatalf("handleServerEvent(turn_complete) error: %v", err)
 	}
 	history := session.HistorySnapshot()
@@ -909,44 +755,13 @@ func TestPlaybackMarkLoop_SendsMonotonicMarks(t *testing.T) {
 	livePlaybackMarkInterval = 10 * time.Millisecond
 	livePlaybackMarkSafetyMargin = 0
 
-	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	received := make(chan []byte, 8)
-	serverErr := make(chan error, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			serverErr <- fmt.Errorf("upgrade websocket: %w", err)
-			return
-		}
-		defer conn.Close()
-		for {
-			if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-				serverErr <- fmt.Errorf("set read deadline: %w", err)
-				return
-			}
-			_, payload, err := conn.ReadMessage()
-			if err != nil {
-				// Most likely the client closed the connection; treat as graceful.
-				return
-			}
-			received <- payload
-		}
-	}))
-	defer server.Close()
-
-	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
-	if err != nil {
-		t.Fatalf("dial websocket: %v", err)
-	}
-	defer conn.Close()
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	received := make(chan types.LiveClientFrame, 8)
 	session := &liveModeSession{
 		ctx:             ctx,
-		conn:            conn,
+		sendFrame:       func(frame types.LiveClientFrame) error { received <- frame; return nil },
 		out:             io.Discard,
 		errOut:          io.Discard,
 		cancelledTurns:  make(map[string]struct{}),
@@ -959,12 +774,10 @@ func TestPlaybackMarkLoop_SendsMonotonicMarks(t *testing.T) {
 	var marks []types.LivePlaybackMarkFrame
 	for len(marks) < 2 {
 		select {
-		case err := <-serverErr:
-			t.Fatalf("server error: %v", err)
-		case payload := <-received:
-			var mark types.LivePlaybackMarkFrame
-			if err := json.Unmarshal(payload, &mark); err != nil {
-				t.Fatalf("decode playback_mark frame: %v", err)
+		case frame := <-received:
+			mark, ok := frame.(types.LivePlaybackMarkFrame)
+			if !ok {
+				t.Fatalf("frame=%T, want types.LivePlaybackMarkFrame", frame)
 			}
 			if mark.Type != "playback_mark" {
 				t.Fatalf("type=%q, want playback_mark", mark.Type)

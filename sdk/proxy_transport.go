@@ -23,17 +23,19 @@ const (
 )
 
 var providerByokHeaders = map[string]string{
-	"anthropic":    "X-Provider-Key-Anthropic",
-	"openai":       "X-Provider-Key-OpenAI",
-	"oai-resp":     "X-Provider-Key-OpenAI",
-	"gem-dev":      "X-Provider-Key-Gemini",
-	"gem-vert":     "X-Provider-Key-VertexAI",
-	"groq":         "X-Provider-Key-Groq",
-	"cerebras":     "X-Provider-Key-Cerebras",
-	"openrouter":   "X-Provider-Key-OpenRouter",
-	"tavily":       "X-Provider-Key-Tavily",
-	"exa":          "X-Provider-Key-Exa",
-	"firecrawl":    "X-Provider-Key-Firecrawl",
+	"anthropic":  "X-Provider-Key-Anthropic",
+	"openai":     "X-Provider-Key-OpenAI",
+	"oai-resp":   "X-Provider-Key-OpenAI",
+	"gem-dev":    "X-Provider-Key-Gemini",
+	"gem-vert":   "X-Provider-Key-VertexAI",
+	"groq":       "X-Provider-Key-Groq",
+	"cerebras":   "X-Provider-Key-Cerebras",
+	"openrouter": "X-Provider-Key-OpenRouter",
+	"cartesia":   "X-Provider-Key-Cartesia",
+	"elevenlabs": "X-Provider-Key-ElevenLabs",
+	"tavily":     "X-Provider-Key-Tavily",
+	"exa":        "X-Provider-Key-Exa",
+	"firecrawl":  "X-Provider-Key-Firecrawl",
 }
 
 func (c *Client) initProxyProviders() {

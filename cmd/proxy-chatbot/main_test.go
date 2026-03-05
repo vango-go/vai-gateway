@@ -314,11 +314,8 @@ func TestComposeSystemPrompt_AppendsTalkInstruction(t *testing.T) {
 	t.Parallel()
 
 	withoutBase := composeSystemPrompt("", false)
-	if !strings.Contains(withoutBase, `talk_to_user`) {
-		t.Fatalf("missing talk_to_user instruction in prompt: %q", withoutBase)
-	}
-	if !strings.Contains(withoutBase, `{"content":"..."}`) {
-		t.Fatalf("missing canonical content shape in prompt: %q", withoutBase)
+	if withoutBase != talkToUserSystemInstruction {
+		t.Fatalf("prompt=%q, want %q", withoutBase, talkToUserSystemInstruction)
 	}
 
 	withBase := composeSystemPrompt("Be concise.", false)
@@ -800,10 +797,10 @@ func TestWriteAudioUnavailableWarning_EmitsOncePerTurn(t *testing.T) {
 	t.Parallel()
 
 	var errOut bytes.Buffer
-	state := &streamPrintState{}
+	var warned bool
 
-	writeAudioUnavailableWarning(&errOut, state, "tts_failed", "first failure")
-	writeAudioUnavailableWarning(&errOut, state, "tts_failed", "second failure")
+	writeAudioUnavailableWarning(&errOut, &warned, "tts_failed", "first failure")
+	writeAudioUnavailableWarning(&errOut, &warned, "tts_failed", "second failure")
 
 	got := errOut.String()
 	if strings.Count(got, "audio unavailable") != 1 {
@@ -816,7 +813,7 @@ func TestWriteAudioUnavailableWarning_EmitsOncePerTurn(t *testing.T) {
 		t.Fatalf("unexpected second warning message, output=%q", got)
 	}
 
-	writeAudioUnavailableWarning(&errOut, &streamPrintState{}, "tts_failed", "new turn")
+	writeAudioUnavailableWarning(&errOut, new(bool), "tts_failed", "new turn")
 	if strings.Count(errOut.String(), "audio unavailable") != 2 {
 		t.Fatalf("warning count for two turns=%d, want 2; output=%q", strings.Count(errOut.String(), "audio unavailable"), errOut.String())
 	}

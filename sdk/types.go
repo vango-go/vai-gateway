@@ -13,6 +13,12 @@ type Delta = types.Delta
 
 // Event types
 type (
+	// LiveEvent is an event from /v1/live.
+	LiveEvent = types.LiveServerEvent
+
+	// LiveClientFrame is a client frame for /v1/live.
+	LiveClientFrame = types.LiveClientFrame
+
 	// MessageStartEvent is sent at the beginning of a message.
 	MessageStartEvent = types.MessageStartEvent
 
@@ -94,6 +100,9 @@ type (
 	// ServerRunConfig controls gateway-side run limits.
 	ServerRunConfig = types.RunConfig
 
+	// ServerRunStopReason indicates why a gateway-owned run ended.
+	ServerRunStopReason = types.RunStopReason
+
 	// ServerRunResultEnvelope is the blocking /v1/runs response.
 	ServerRunResultEnvelope = types.RunResultEnvelope
 
@@ -135,6 +144,51 @@ type (
 
 	// ServerRunErrorEvent is the terminal error event.
 	ServerRunErrorEvent = types.RunErrorEvent
+
+	// LiveSessionStartedEvent confirms live session startup.
+	LiveSessionStartedEvent = types.LiveSessionStartedEvent
+
+	// LiveAssistantTextDeltaEvent streams assistant text in live mode.
+	LiveAssistantTextDeltaEvent = types.LiveAssistantTextDeltaEvent
+
+	// LiveAudioChunkEvent streams assistant audio in live mode.
+	LiveAudioChunkEvent = types.LiveAudioChunkEvent
+
+	// LiveToolCallEvent requests client tool execution in live mode.
+	LiveToolCallEvent = types.LiveToolCallEvent
+
+	// LiveUserTurnCommittedEvent indicates the gateway committed a live user turn.
+	LiveUserTurnCommittedEvent = types.LiveUserTurnCommittedEvent
+
+	// LiveTurnCompleteEvent indicates a live turn completed and includes synced history.
+	LiveTurnCompleteEvent = types.LiveTurnCompleteEvent
+
+	// LiveAudioUnavailableEvent indicates live audio is unavailable for the current turn.
+	LiveAudioUnavailableEvent = types.LiveAudioUnavailableEvent
+
+	// LiveAudioResetEvent indicates buffered live audio for a turn must be dropped.
+	LiveAudioResetEvent = types.LiveAudioResetEvent
+
+	// LiveTurnCancelledEvent indicates a live turn was cancelled.
+	LiveTurnCancelledEvent = types.LiveTurnCancelledEvent
+
+	// LiveErrorEvent is a live protocol/runtime error.
+	LiveErrorEvent = types.LiveErrorEvent
+
+	// LiveStartFrame starts a live session.
+	LiveStartFrame = types.LiveStartFrame
+
+	// LiveToolResultFrame sends a client tool result in live mode.
+	LiveToolResultFrame = types.LiveToolResultFrame
+
+	// LivePlaybackMarkFrame reports playback progress in live mode.
+	LivePlaybackMarkFrame = types.LivePlaybackMarkFrame
+
+	// LivePlaybackStateFrame reports playback completion/stoppage in live mode.
+	LivePlaybackStateFrame = types.LivePlaybackStateFrame
+
+	// LiveStopFrame requests graceful live session shutdown.
+	LiveStopFrame = types.LiveStopFrame
 
 	// Usage contains token counts and cost information.
 	Usage = types.Usage

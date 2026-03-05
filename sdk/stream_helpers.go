@@ -74,6 +74,27 @@ func AudioUnavailableFrom(event RunStreamEvent) (AudioUnavailableEvent, bool) {
 	return unavailable, ok
 }
 
+// LiveTextDeltaFrom extracts assistant text deltas from live events.
+func LiveTextDeltaFrom(event LiveEvent) (string, bool) {
+	delta, ok := event.(LiveAssistantTextDeltaEvent)
+	if !ok {
+		return "", false
+	}
+	return delta.Text, true
+}
+
+// LiveAudioChunkFrom extracts assistant audio chunks from live events.
+func LiveAudioChunkFrom(event LiveEvent) (LiveAudioChunkEvent, bool) {
+	chunk, ok := event.(LiveAudioChunkEvent)
+	return chunk, ok
+}
+
+// LiveTurnCompleteFrom extracts turn completion events from live events.
+func LiveTurnCompleteFrom(event LiveEvent) (LiveTurnCompleteEvent, bool) {
+	complete, ok := event.(LiveTurnCompleteEvent)
+	return complete, ok
+}
+
 // ToolUseStartFrom extracts tool-use start metadata from wrapped stream events.
 func ToolUseStartFrom(event RunStreamEvent) (index int, id, name string, ok bool) {
 	wrapped, ok := event.(StreamEventWrapper)

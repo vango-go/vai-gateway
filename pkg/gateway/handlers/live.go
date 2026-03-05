@@ -31,7 +31,6 @@ import (
 	"github.com/vango-go/vai-lite/pkg/gateway/ratelimit"
 	"github.com/vango-go/vai-lite/pkg/gateway/runloop"
 	"github.com/vango-go/vai-lite/pkg/gateway/tools/servertools"
-	vai "github.com/vango-go/vai-lite/sdk"
 )
 
 const (
@@ -39,17 +38,19 @@ const (
 	liveInputSampleRateHz         = 16000
 	liveOutputFormat              = "pcm_s16le"
 	liveDefaultOutputSampleRateHz = 16000
-	liveSilenceCommitMS           = 600
+	liveSilenceCommitMS           = 900
 )
 
 const liveGracePeriod = 5 * time.Second
 
 var liveTTSDrainTimeout = 10 * time.Second
 
-const liveTalkToUserSystemInstruction = `You must use the talk_to_user tool for any user-facing speech.
-When talking to the user, call talk_to_user with JSON arguments shaped like {"content":"..."}.
-You may use other tools first, then talk_to_user to present results.
-Do not duplicate the same spoken content as plain assistant text.`
+const liveAssistantSpeechSystemInstruction = `Live voice mode:
+- Speak to the user using normal assistant text only.
+- Do NOT call the talk_to_user tool (it is deprecated in live mode).
+- You may use other tools first, then answer the user with assistant text.
+- Avoid tool-only chatter. All assistant text may be spoken aloud to the user.
+User messages are transcribed via STT and may contain misspellings.`
 
 type liveSessionState string
 
@@ -94,11 +95,6 @@ type liveToolResultPayload struct {
 	Error   *types.Error
 }
 
-type liveToolMeta struct {
-	id   string
-	name string
-}
-
 type liveCommittedUtterance struct {
 	TurnID      string
 	PCM         []byte
@@ -120,25 +116,24 @@ type livePendingTurnResult struct {
 }
 
 type liveTurnRuntime struct {
-	id                 string
-	lifecycle          liveTurnLifecycle
-	speechEndedAt      time.Time
-	graceDeadline      time.Time
-	nonTalkToolCalled  bool
-	playbackFinished   bool
-	audioStarted       bool
-	playedMS           int
-	interruptRequested bool
-	interruptPlayedMS  int
-	interruptFrozen    bool
-	suppressOutgoing   bool
-	talkCallID         string
-	talkFullText       strings.Builder
-	talkTimestamps     []tts.WordTimestampsBatch
-	pendingResult      *livePendingTurnResult
-	runCancel          context.CancelFunc
-	baseUserPCM        []byte
-	baseHistory        []types.Message
+	id                  string
+	lifecycle           liveTurnLifecycle
+	speechEndedAt       time.Time
+	graceDeadline       time.Time
+	toolCalled          bool
+	playbackFinished    bool
+	audioStarted        bool
+	playedMS            int
+	interruptRequested  bool
+	interruptPlayedMS   int
+	interruptFrozen     bool
+	suppressOutgoing    bool
+	assistantFullText   strings.Builder
+	assistantTimestamps []tts.WordTimestampsBatch
+	pendingResult       *livePendingTurnResult
+	runCancel           context.CancelFunc
+	baseUserPCM         []byte
+	baseHistory         []types.Message
 }
 
 type liveTalkTTS struct {
@@ -546,7 +541,7 @@ func (h LiveHandler) readAndValidateLiveStart(ctx context.Context, r *http.Reque
 		return nil, nil, nil, coreErr
 	}
 	runReq.Request.Tools = injectedTools
-	runReq.Request.System = ensureLiveTalkToUserSystem(runReq.Request.System)
+	runReq.Request.System = ensureLiveAssistantSpeechSystem(runReq.Request.System)
 
 	publicModel := runReq.Request.Model
 	runReq.Request.Model = modelName
@@ -1105,7 +1100,7 @@ func (s *liveSession) runTurn(committed liveCommittedUtterance) {
 			return
 		}
 		if errors.Is(err, context.Canceled) && turnInterrupted {
-			// Continue below to finalize an interrupted turn with truncated talk_to_user content.
+			// Continue below to finalize an interrupted turn with truncated assistant speech content.
 		} else {
 			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				s.send(types.LiveErrorEvent{
@@ -1133,7 +1128,7 @@ func (s *liveSession) runTurn(committed liveCommittedUtterance) {
 			stopReason = result.StopReason
 			history = append([]types.Message(nil), result.Messages...)
 		}
-		history = ensureTalkToUserHistory(history, turn.talkCallID, turn.talkFullText.String())
+		history = ensureAssistantTextHistory(history, turn.assistantFullText.String())
 		if !s.setPendingTurnResult(turn.id, &livePendingTurnResult{
 			stopReason: stopReason,
 			history:    history,
@@ -1184,7 +1179,7 @@ func (s *liveSession) isGraceCancelableLocked(turn *liveTurnRuntime, now time.Ti
 	if turn.interruptRequested {
 		return false
 	}
-	if turn.nonTalkToolCalled || turn.playbackFinished {
+	if turn.toolCalled || turn.playbackFinished {
 		return false
 	}
 	return now.Before(turn.graceDeadline) || now.Equal(turn.graceDeadline)
@@ -1217,7 +1212,7 @@ func (s *liveSession) shouldFinalizeTurnNow(turnID string) bool {
 	if turn.interruptRequested {
 		return true
 	}
-	if turn.nonTalkToolCalled || !turn.audioStarted || turn.playbackFinished {
+	if turn.toolCalled || !turn.audioStarted || turn.playbackFinished {
 		return true
 	}
 	return !time.Now().Before(turn.graceDeadline)
@@ -1239,7 +1234,7 @@ func (s *liveSession) turnFinalizeStatus(turnID string) (finalize bool, cancelle
 	if turn.interruptRequested {
 		return true, false
 	}
-	if turn.nonTalkToolCalled || !turn.audioStarted || turn.playbackFinished {
+	if turn.toolCalled || !turn.audioStarted || turn.playbackFinished {
 		return true, false
 	}
 	return !time.Now().Before(turn.graceDeadline), false
@@ -1274,13 +1269,13 @@ func (s *liveSession) finalizeTurn(turnID string) {
 	_ = s.send(ev)
 }
 
-func (s *liveSession) markNonTalkToolCalled(turnID string) {
+func (s *liveSession) markToolCalled(turnID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.activeTurn == nil || s.activeTurn.id != turnID {
 		return
 	}
-	s.activeTurn.nonTalkToolCalled = true
+	s.activeTurn.toolCalled = true
 }
 
 func (s *liveSession) markAudioStarted(turnID string) {
@@ -1311,83 +1306,62 @@ func (s *liveSession) applyInterruptTruncationLocked(turn *liveTurnRuntime) {
 	if playedMS <= 0 {
 		playedMS = turn.playedMS
 	}
-	fullText := turn.talkFullText.String()
-	prefix := truncateTalkToUserPrefix(fullText, turn.talkTimestamps, playedMS)
+	fullText := turn.assistantFullText.String()
+	prefix := truncateAssistantTextPrefix(fullText, turn.assistantTimestamps, playedMS)
 
 	content := liveInterruptMarker
 	if strings.TrimSpace(prefix) != "" {
 		content = prefix + " " + liveInterruptMarker
 	}
 
-	if ok := setLastTalkToUserContent(turn.pendingResult.history, content); ok {
+	if ok := setLastAssistantTextContent(turn.pendingResult.history, content); ok {
 		return
 	}
-	turn.pendingResult.history = ensureTalkToUserHistory(turn.pendingResult.history, turn.talkCallID, content)
+	turn.pendingResult.history = ensureAssistantTextHistory(turn.pendingResult.history, content)
 }
 
-func ensureTalkToUserHistory(history []types.Message, callID string, content string) []types.Message {
-	if ok := setLastTalkToUserContent(history, content); ok {
+func ensureAssistantTextHistory(history []types.Message, content string) []types.Message {
+	if ok := setLastAssistantTextContent(history, content); ok {
 		return history
 	}
-	callID = strings.TrimSpace(callID)
-	if callID == "" {
-		callID = "talk_to_user"
-	}
-	assistant := types.Message{
-		Role: "assistant",
-		Content: []types.ContentBlock{
-			types.ToolUseBlock{
-				Type:  "tool_use",
-				ID:    callID,
-				Name:  "talk_to_user",
-				Input: map[string]any{"content": content},
-			},
-		},
-	}
-	toolResult := types.Message{
-		Role: "user",
-		Content: []types.ContentBlock{
-			types.ToolResultBlock{
-				Type:      "tool_result",
-				ToolUseID: callID,
-				Content: []types.ContentBlock{
-					types.TextBlock{Type: "text", Text: "delivered"},
-				},
-			},
-		},
-	}
-	return append(history, assistant, toolResult)
+	assistant := types.Message{Role: "assistant", Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: content}}}
+	return append(history, assistant)
 }
 
-func setLastTalkToUserContent(history []types.Message, content string) bool {
+func setLastAssistantTextContent(history []types.Message, content string) bool {
 	for mi := len(history) - 1; mi >= 0; mi-- {
 		if !strings.EqualFold(strings.TrimSpace(history[mi].Role), "assistant") {
 			continue
 		}
 		blocks := history[mi].ContentBlocks()
-		for bi := len(blocks) - 1; bi >= 0; bi-- {
-			switch b := blocks[bi].(type) {
-			case types.ToolUseBlock:
-				if !strings.EqualFold(strings.TrimSpace(b.Name), "talk_to_user") {
-					continue
-				}
-				if b.Input == nil {
-					b.Input = make(map[string]any, 1)
-				}
-				b.Input["content"] = content
-				blocks[bi] = b
-				history[mi].Content = blocks
-				return true
-			case *types.ToolUseBlock:
-				if b == nil || !strings.EqualFold(strings.TrimSpace(b.Name), "talk_to_user") {
-					continue
-				}
-				if b.Input == nil {
-					b.Input = make(map[string]any, 1)
-				}
-				b.Input["content"] = content
-				return true
+		hasText := false
+		for _, block := range blocks {
+			switch block.(type) {
+			case types.TextBlock, *types.TextBlock:
+				hasText = true
 			}
+		}
+		if !hasText {
+			continue
+		}
+
+		out := make([]types.ContentBlock, 0, len(blocks))
+		replaced := false
+		for _, block := range blocks {
+			switch block.(type) {
+			case types.TextBlock, *types.TextBlock:
+				if replaced {
+					continue
+				}
+				out = append(out, types.TextBlock{Type: "text", Text: content})
+				replaced = true
+			default:
+				out = append(out, block)
+			}
+		}
+		if replaced {
+			history[mi].Content = out
+			return true
 		}
 	}
 	return false
@@ -1399,7 +1373,7 @@ type liveTalkToken struct {
 	norm  string
 }
 
-func truncateTalkToUserPrefix(fullText string, batches []tts.WordTimestampsBatch, playedMS int) string {
+func truncateAssistantTextPrefix(fullText string, batches []tts.WordTimestampsBatch, playedMS int) string {
 	fullText = strings.TrimRight(fullText, " \n\t")
 	if fullText == "" || playedMS <= 0 {
 		return ""
@@ -1612,9 +1586,6 @@ type liveTalkTurnState struct {
 	session *liveSession
 	turnID  string
 
-	metaByIndex    map[int]liveToolMeta
-	decoderByIndex map[int]*vai.ToolArgStringDecoder
-
 	tts      liveTTSSession
 	ttsReady bool
 	ttsErr   bool
@@ -1625,10 +1596,8 @@ type liveTalkTurnState struct {
 
 func newLiveTalkTurnState(session *liveSession, turnID string) *liveTalkTurnState {
 	return &liveTalkTurnState{
-		session:        session,
-		turnID:         turnID,
-		metaByIndex:    make(map[int]liveToolMeta),
-		decoderByIndex: make(map[int]*vai.ToolArgStringDecoder),
+		session: session,
+		turnID:  turnID,
 	}
 }
 
@@ -1642,9 +1611,7 @@ func (s *liveTalkTurnState) handleRunEvent(event types.RunStreamEvent) error {
 			Message: ev.Message,
 		})
 	case types.RunToolCallStartEvent:
-		if !strings.EqualFold(strings.TrimSpace(ev.Name), "talk_to_user") {
-			s.session.markNonTalkToolCalled(s.turnID)
-		}
+		s.session.markToolCalled(s.turnID)
 	case types.RunStreamEventWrapper:
 		return s.handleStreamEvent(ev.Event)
 	}
@@ -1652,97 +1619,66 @@ func (s *liveTalkTurnState) handleRunEvent(event types.RunStreamEvent) error {
 }
 
 func (s *liveTalkTurnState) handleStreamEvent(event types.StreamEvent) error {
+	handleAssistantText := func(text string) error {
+		if text == "" {
+			return nil
+		}
+		if s.session != nil {
+			s.session.mu.Lock()
+			if s.session.activeTurn != nil && s.session.activeTurn.id == s.turnID && !s.session.activeTurn.interruptFrozen {
+				s.session.activeTurn.assistantFullText.WriteString(text)
+			}
+			s.session.mu.Unlock()
+			if s.session.isTurnSuppressed(s.turnID) {
+				return nil
+			}
+		}
+		s.session.send(types.LiveAssistantTextDeltaEvent{
+			Type:   "assistant_text_delta",
+			TurnID: s.turnID,
+			Text:   text,
+		})
+		if s.ttsErr {
+			return nil
+		}
+		if s.session == nil || s.session.runTemplate == nil || s.session.runTemplate.Request.Voice == nil {
+			// Live voice output not configured for this session/test run.
+			return nil
+		}
+		if err := s.ensureTTS(); err != nil {
+			s.ttsErr = true
+			s.session.send(types.LiveAudioUnavailableEvent{
+				Type:    "audio_unavailable",
+				TurnID:  s.turnID,
+				Reason:  "tts_failed",
+				Message: "TTS synthesis failed: " + err.Error(),
+			})
+			return nil
+		}
+		if err := s.tts.OnTextDelta(text); err != nil {
+			s.ttsErr = true
+			s.session.send(types.LiveAudioUnavailableEvent{
+				Type:    "audio_unavailable",
+				TurnID:  s.turnID,
+				Reason:  "tts_failed",
+				Message: "TTS synthesis failed: " + err.Error(),
+			})
+		}
+		return nil
+	}
+
 	switch ev := event.(type) {
 	case types.ContentBlockStartEvent:
-		if tool, ok := ev.ContentBlock.(types.ToolUseBlock); ok {
-			s.metaByIndex[ev.Index] = liveToolMeta{id: tool.ID, name: tool.Name}
-			if strings.EqualFold(strings.TrimSpace(tool.Name), "talk_to_user") {
-				s.decoderByIndex[ev.Index] = vai.NewToolArgStringDecoder(vai.ToolArgStringDecoderOptions{})
-				if s.session != nil {
-					s.session.mu.Lock()
-					if s.session.activeTurn != nil && s.session.activeTurn.id == s.turnID && s.session.activeTurn.talkCallID == "" {
-						s.session.activeTurn.talkCallID = tool.ID
-					}
-					s.session.mu.Unlock()
-				}
-			}
+		if tb, ok := ev.ContentBlock.(types.TextBlock); ok {
+			return handleAssistantText(tb.Text)
+		}
+		if tb, ok := ev.ContentBlock.(*types.TextBlock); ok && tb != nil {
+			return handleAssistantText(tb.Text)
 		}
 	case types.ContentBlockDeltaEvent:
-		switch delta := ev.Delta.(type) {
-		case types.TextDelta:
-			if delta.Text == "" {
-				return nil
-			}
-			if s.session != nil && s.session.isTurnSuppressed(s.turnID) {
-				return nil
-			}
-			s.session.send(types.LiveAssistantTextDeltaEvent{
-				Type:   "assistant_text_delta",
-				TurnID: s.turnID,
-				Text:   delta.Text,
-			})
-		case types.InputJSONDelta:
-			meta, ok := s.metaByIndex[ev.Index]
-			if !ok || !strings.EqualFold(strings.TrimSpace(meta.name), "talk_to_user") {
-				return nil
-			}
-			decoder := s.decoderByIndex[ev.Index]
-			if decoder == nil {
-				decoder = vai.NewToolArgStringDecoder(vai.ToolArgStringDecoderOptions{})
-				s.decoderByIndex[ev.Index] = decoder
-			}
-			update := decoder.Push(delta.PartialJSON)
-			if !update.Found || update.Delta == "" {
-				return nil
-			}
-			if s.session != nil {
-				s.session.mu.Lock()
-				if s.session.activeTurn != nil && s.session.activeTurn.id == s.turnID {
-					if s.session.activeTurn.talkCallID == "" {
-						s.session.activeTurn.talkCallID = meta.id
-					}
-					if !s.session.activeTurn.interruptFrozen {
-						s.session.activeTurn.talkFullText.WriteString(update.Delta)
-					}
-				}
-				s.session.mu.Unlock()
-			}
-			if s.session != nil && s.session.isTurnSuppressed(s.turnID) {
-				return nil
-			}
-			s.session.send(types.LiveTalkToUserTextDeltaEvent{
-				Type:   "talk_to_user_text_delta",
-				TurnID: s.turnID,
-				CallID: meta.id,
-				Index:  ev.Index,
-				Text:   update.Delta,
-			})
-			if s.ttsErr {
-				return nil
-			}
-			if err := s.ensureTTS(); err != nil {
-				s.ttsErr = true
-				s.session.send(types.LiveAudioUnavailableEvent{
-					Type:    "audio_unavailable",
-					TurnID:  s.turnID,
-					Reason:  "tts_failed",
-					Message: "TTS synthesis failed: " + err.Error(),
-				})
-				return nil
-			}
-			if err := s.tts.OnTextDelta(update.Delta); err != nil {
-				s.ttsErr = true
-				s.session.send(types.LiveAudioUnavailableEvent{
-					Type:    "audio_unavailable",
-					TurnID:  s.turnID,
-					Reason:  "tts_failed",
-					Message: "TTS synthesis failed: " + err.Error(),
-				})
-			}
+		if td, ok := ev.Delta.(types.TextDelta); ok {
+			return handleAssistantText(td.Text)
 		}
-	case types.ContentBlockStopEvent:
-		delete(s.metaByIndex, ev.Index)
-		delete(s.decoderByIndex, ev.Index)
 	}
 	return nil
 }
@@ -1785,7 +1721,7 @@ func (s *liveTalkTurnState) collectTTSTimestamps() {
 		}
 		s.session.mu.Lock()
 		if s.session.activeTurn != nil && s.session.activeTurn.id == s.turnID {
-			s.session.activeTurn.talkTimestamps = append(s.session.activeTurn.talkTimestamps, batch)
+			s.session.activeTurn.assistantTimestamps = append(s.session.activeTurn.assistantTimestamps, batch)
 		}
 		s.session.mu.Unlock()
 	}
@@ -1985,9 +1921,11 @@ func (e *liveToolExecutor) Execute(ctx context.Context, name string, input map[s
 	}
 	trimmed := strings.TrimSpace(name)
 	if strings.EqualFold(trimmed, "talk_to_user") {
-		return []types.ContentBlock{
-			types.TextBlock{Type: "text", Text: "delivered"},
-		}, nil
+		return nil, &types.Error{
+			Type:    string(core.ErrInvalidRequest),
+			Message: "talk_to_user is deprecated in live mode; use normal assistant text for speaking",
+			Code:    "talk_to_user_deprecated",
+		}
 	}
 	if e.session.serverRegistry != nil && e.session.serverRegistry.Has(trimmed) {
 		return e.session.serverRegistry.Execute(ctx, trimmed, input)
@@ -2049,8 +1987,8 @@ func (e *liveToolExecutor) Execute(ctx context.Context, name string, input map[s
 }
 
 func injectLiveTools(reqTools []types.Tool, serverTools []string, registry *servertools.Registry) ([]types.Tool, error) {
-	out := make([]types.Tool, 0, len(reqTools)+len(serverTools)+1)
-	seenByName := make(map[string]types.Tool, len(reqTools)+len(serverTools)+1)
+	out := make([]types.Tool, 0, len(reqTools)+len(serverTools))
+	seenByName := make(map[string]types.Tool, len(reqTools)+len(serverTools))
 
 	for i, tool := range reqTools {
 		if tool.Type == types.ToolTypeFunction {
@@ -2059,6 +1997,14 @@ func injectLiveTools(reqTools []types.Tool, serverTools []string, registry *serv
 				return nil, &core.Error{
 					Type:    core.ErrInvalidRequest,
 					Message: "function tool name must be non-empty",
+					Param:   fmt.Sprintf("request.tools[%d].name", i),
+					Code:    "run_validation_failed",
+				}
+			}
+			if strings.EqualFold(name, "talk_to_user") {
+				return nil, &core.Error{
+					Type:    core.ErrInvalidRequest,
+					Message: "talk_to_user is deprecated in live mode; use normal assistant text for speaking",
 					Param:   fmt.Sprintf("request.tools[%d].name", i),
 					Code:    "run_validation_failed",
 				}
@@ -2101,33 +2047,15 @@ func injectLiveTools(reqTools []types.Tool, serverTools []string, registry *serv
 		seenByName[name] = def
 		out = append(out, def)
 	}
-
-	talkName := "talk_to_user"
-	if existing, ok := seenByName[talkName]; ok {
-		if existing.Type != types.ToolTypeFunction {
-			return nil, &core.Error{
-				Type:    core.ErrInvalidRequest,
-				Message: "talk_to_user must be a function tool",
-				Param:   "request.tools",
-				Code:    "run_validation_failed",
-			}
-		}
-		return out, nil
-	}
-
-	out = append(out, liveTalkToUserToolDefinition())
 	return out, nil
 }
 
-func ensureLiveTalkToUserSystem(system any) any {
+func ensureLiveAssistantSpeechSystem(system any) any {
 	base := strings.TrimSpace(systemToStringValue(system))
 	if base == "" {
-		return liveTalkToUserSystemInstruction
+		return liveAssistantSpeechSystemInstruction
 	}
-	if strings.Contains(base, "talk_to_user") {
-		return base
-	}
-	return base + "\n\n" + liveTalkToUserSystemInstruction
+	return base + "\n\n" + liveAssistantSpeechSystemInstruction
 }
 
 func systemToStringValue(system any) string {
@@ -2155,23 +2083,6 @@ func systemToStringValue(system any) string {
 			return s.String()
 		}
 		return fmt.Sprintf("%v", system)
-	}
-}
-
-func liveTalkToUserToolDefinition() types.Tool {
-	additionalProps := false
-	return types.Tool{
-		Type:        types.ToolTypeFunction,
-		Name:        "talk_to_user",
-		Description: "Speak text directly to the user via the voice/output channel.",
-		InputSchema: &types.JSONSchema{
-			Type: "object",
-			Properties: map[string]types.JSONSchema{
-				"content": {Type: "string", Description: "Exact text to speak to the user"},
-			},
-			Required:             []string{"content"},
-			AdditionalProperties: &additionalProps,
-		},
 	}
 }
 

@@ -25,10 +25,7 @@ const (
 	defaultLiveOutputRate = "auto"
 )
 
-const talkToUserSystemInstruction = `You must use the talk_to_user tool for any user-facing speech.
-When talking to the user, call talk_to_user with JSON arguments shaped like {"content":"..."}.
-You may use other tools (e.g. web tools) first, then talk_to_user to present results.
-Do not duplicate the same spoken content as plain assistant text. When you see the prior talk_to_user tool calls in your context window, know that those are your prior messages to the user. You CAN still use normal assistant messages, they just won't be shown to the user.`
+const talkToUserSystemInstruction = `You are in voice mode. Note that the user's responses are transcribed via STT, you may need to use some judgement on potentiall misspellings.`
 
 type chatConfig struct {
 	BaseURL        string
@@ -738,7 +735,7 @@ func buildStreamCallbacks(out io.Writer, printState *streamPrintState, player *p
 			}
 		},
 		OnAudioUnavailable: func(reason, message string) {
-			writeAudioUnavailableWarning(os.Stderr, printState, reason, message)
+			writeAudioUnavailableWarning(os.Stderr, &printState.audioUnavailableWarned, reason, message)
 		},
 		OnTextDelta: func(text string) {
 			closeOpenToolStreamLine(out, printState)
@@ -805,37 +802,11 @@ func buildStreamCallbacks(out io.Writer, printState *streamPrintState, player *p
 			delete(printState.talkEndedWithNewlineByIndex, index)
 		},
 		OnToolCallStart: func(id, name string, _ map[string]any) {
-			closeOpenToolStreamLine(out, printState)
-			closeOpenTalkStreamLines(out, printState)
-			if isTalkToUserTool(name) {
-				return
-			}
-			fmt.Fprintf(out, "[tool] %s\n", name)
+			writeToolExecutionMarker(out, name, func() {
+				closeOpenToolStreamLine(out, printState)
+				closeOpenTalkStreamLines(out, printState)
+			})
 		},
-	}
-}
-
-func writeAudioUnavailableWarning(w io.Writer, state *streamPrintState, reason, message string) {
-	if state != nil && state.audioUnavailableWarned {
-		return
-	}
-	if state != nil {
-		state.audioUnavailableWarned = true
-	}
-	if w == nil {
-		w = os.Stderr
-	}
-	reason = strings.TrimSpace(reason)
-	message = strings.TrimSpace(message)
-	switch {
-	case reason != "" && message != "":
-		fmt.Fprintf(w, "audio unavailable (reason=%s): %s\n", reason, message)
-	case reason != "":
-		fmt.Fprintf(w, "audio unavailable (reason=%s)\n", reason)
-	case message != "":
-		fmt.Fprintf(w, "audio unavailable: %s\n", message)
-	default:
-		fmt.Fprintln(w, "audio unavailable")
 	}
 }
 

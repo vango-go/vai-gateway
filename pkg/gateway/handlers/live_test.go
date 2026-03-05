@@ -944,7 +944,7 @@ func TestLiveSession_STTGraceCancelsRunningTurn(t *testing.T) {
 	<-done
 }
 
-func TestLiveSession_STTGraceDoesNotCancelAfterNonTalkToolCall(t *testing.T) {
+func TestLiveSession_STTGraceDoesNotCancelAfterToolCall(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -957,11 +957,11 @@ func TestLiveSession_STTGraceDoesNotCancelAfterNonTalkToolCall(t *testing.T) {
 		sendCh:     make(chan any, 8),
 		sttSession: sttSession,
 		activeTurn: &liveTurnRuntime{
-			id:                "turn_1",
-			lifecycle:         liveTurnLifecycleRunning,
-			graceDeadline:     time.Now().Add(2 * time.Second),
-			nonTalkToolCalled: true,
-			baseUserPCM:       []byte{0x01},
+			id:            "turn_1",
+			lifecycle:     liveTurnLifecycleRunning,
+			graceDeadline: time.Now().Add(2 * time.Second),
+			toolCalled:    true,
+			baseUserPCM:   []byte{0x01},
 			runCancel: func() {
 				select {
 				case runCancelCalled <- struct{}{}:
@@ -983,7 +983,7 @@ func TestLiveSession_STTGraceDoesNotCancelAfterNonTalkToolCall(t *testing.T) {
 
 	select {
 	case <-runCancelCalled:
-		t.Fatal("run cancel should not be invoked when non-talk tool was called")
+		t.Fatal("run cancel should not be invoked when a tool was called")
 	default:
 	}
 	select {
@@ -1239,7 +1239,7 @@ func TestLiveSession_STTInterruptOutsideGrace_EmitsAudioReset(t *testing.T) {
 	<-done
 }
 
-func TestLiveSession_FinalizeTurn_TruncatesTalkToUserContentOnInterrupt(t *testing.T) {
+func TestLiveSession_FinalizeTurn_TruncatesAssistantTextOnInterrupt(t *testing.T) {
 	session := &liveSession{
 		ctx:    context.Background(),
 		sendCh: make(chan any, 4),
@@ -1250,24 +1250,7 @@ func TestLiveSession_FinalizeTurn_TruncatesTalkToUserContentOnInterrupt(t *testi
 		{
 			Role: "assistant",
 			Content: []types.ContentBlock{
-				types.ToolUseBlock{
-					Type:  "tool_use",
-					ID:    "call_1",
-					Name:  "talk_to_user",
-					Input: map[string]any{"content": full},
-				},
-			},
-		},
-		{
-			Role: "user",
-			Content: []types.ContentBlock{
-				types.ToolResultBlock{
-					Type:      "tool_result",
-					ToolUseID: "call_1",
-					Content: []types.ContentBlock{
-						types.TextBlock{Type: "text", Text: "delivered"},
-					},
-				},
+				types.TextBlock{Type: "text", Text: full},
 			},
 		},
 	}
@@ -1277,8 +1260,7 @@ func TestLiveSession_FinalizeTurn_TruncatesTalkToUserContentOnInterrupt(t *testi
 		lifecycle:          liveTurnLifecycleAwaitingGrace,
 		interruptRequested: true,
 		interruptPlayedMS:  800,
-		talkCallID:         "call_1",
-		talkTimestamps: []tts.WordTimestampsBatch{
+		assistantTimestamps: []tts.WordTimestampsBatch{
 			{
 				Words:  []string{"Once", "upon", "a", "time", "there", "was", "a", "cat"},
 				EndSec: []float64{0.20, 0.40, 0.55, 0.75, 1.00, 1.20, 1.35, 1.60},
@@ -1289,7 +1271,7 @@ func TestLiveSession_FinalizeTurn_TruncatesTalkToUserContentOnInterrupt(t *testi
 			history:    history,
 		},
 	}
-	turn.talkFullText.WriteString(full)
+	turn.assistantFullText.WriteString(full)
 
 	session.mu.Lock()
 	session.activeTurn = turn
@@ -1306,31 +1288,20 @@ func TestLiveSession_FinalizeTurn_TruncatesTalkToUserContentOnInterrupt(t *testi
 		if ev.TurnID != "turn_1" {
 			t.Fatalf("turn_id=%q, want turn_1", ev.TurnID)
 		}
-		// Find talk_to_user and assert truncation + marker.
 		found := ""
 		for i := len(ev.History) - 1; i >= 0; i-- {
 			if ev.History[i].Role != "assistant" {
 				continue
 			}
-			for _, b := range ev.History[i].ContentBlocks() {
-				if tb, ok := b.(types.ToolUseBlock); ok && strings.EqualFold(tb.Name, "talk_to_user") {
-					if tb.Input != nil {
-						if v, ok := tb.Input["content"].(string); ok {
-							found = v
-						}
-					}
-				}
-			}
-			if found != "" {
-				break
-			}
+			found = ev.History[i].TextContent()
+			break
 		}
 		if found == "" {
-			t.Fatal("did not find talk_to_user content in history")
+			t.Fatal("did not find assistant text content in history")
 		}
 		want := "Once upon a time, [user interrupt detected]"
 		if found != want {
-			t.Fatalf("talk_to_user.content=%q, want %q", found, want)
+			t.Fatalf("assistant_text=%q, want %q", found, want)
 		}
 	default:
 		t.Fatal("expected turn_complete event")
