@@ -277,7 +277,7 @@ func TestBuildClientOptions_RegistersProviderKeys(t *testing.T) {
 func TestBuildChatTools_DefaultNamesAndHandlers(t *testing.T) {
 	t.Parallel()
 
-	tools := buildChatTools(chatConfig{})
+	tools := buildChatTools(chatConfig{ProviderKeys: map[string]string{"gem-dev": "gem-test"}})
 	if len(tools) != 3 {
 		t.Fatalf("len(tools)=%d, want 3", len(tools))
 	}
@@ -287,8 +287,8 @@ func TestBuildChatTools_DefaultNamesAndHandlers(t *testing.T) {
 	if tools[1].Name != "vai_web_fetch" {
 		t.Fatalf("tools[1].Name=%q, want %q", tools[1].Name, "vai_web_fetch")
 	}
-	if tools[2].Name != "talk_to_user" {
-		t.Fatalf("tools[2].Name=%q, want %q", tools[2].Name, "talk_to_user")
+	if tools[2].Name != "vai_image" {
+		t.Fatalf("tools[2].Name=%q, want %q", tools[2].Name, "vai_image")
 	}
 	for i, tool := range tools {
 		if tool.Handler == nil {
@@ -297,43 +297,37 @@ func TestBuildChatTools_DefaultNamesAndHandlers(t *testing.T) {
 	}
 }
 
-func TestBuildChatTools_VoiceMode_ExcludesTalkToUser(t *testing.T) {
+func TestBuildChatTools_VoiceMode_StillUsesServerTools(t *testing.T) {
 	t.Parallel()
 
-	tools := buildChatTools(chatConfig{VoiceEnabled: true})
-	if len(tools) != 2 {
-		t.Fatalf("len(tools)=%d, want 2", len(tools))
+	tools := buildChatTools(chatConfig{VoiceEnabled: true, ProviderKeys: map[string]string{"gem-dev": "gem-test"}})
+	if len(tools) != 3 {
+		t.Fatalf("len(tools)=%d, want 3", len(tools))
 	}
-	for _, tool := range tools {
-		if tool.Name == "talk_to_user" {
-			t.Fatalf("voice mode should not include talk_to_user tool")
-		}
+	if tools[2].Name != "vai_image" {
+		t.Fatalf("tools[2].Name=%q, want vai_image", tools[2].Name)
 	}
 }
 
-func TestComposeSystemPrompt_AppendsTalkInstruction(t *testing.T) {
+func TestComposeSystemPrompt_AppendsVoiceInstructionOnlyForVoiceMode(t *testing.T) {
 	t.Parallel()
 
 	withoutBase := composeSystemPrompt("", false)
-	if withoutBase != talkToUserSystemInstruction {
-		t.Fatalf("prompt=%q, want %q", withoutBase, talkToUserSystemInstruction)
+	if withoutBase != "" {
+		t.Fatalf("prompt=%q, want empty string", withoutBase)
 	}
 
 	withBase := composeSystemPrompt("Be concise.", false)
-	if !strings.Contains(withBase, "Be concise.") {
-		t.Fatalf("missing user prompt prefix: %q", withBase)
-	}
-	if !strings.Contains(withBase, talkToUserSystemInstruction) {
-		t.Fatalf("missing enforced talk instruction suffix: %q", withBase)
+	if withBase != "Be concise." {
+		t.Fatalf("prompt=%q, want %q", withBase, "Be concise.")
 	}
 
-	// Voice mode: no talk_to_user instruction
 	voicePrompt := composeSystemPrompt("Be concise.", true)
-	if strings.Contains(voicePrompt, "talk_to_user") {
-		t.Fatalf("voice mode should not include talk_to_user instruction: %q", voicePrompt)
+	if !strings.Contains(voicePrompt, "Be concise.") {
+		t.Fatalf("missing user prompt prefix: %q", voicePrompt)
 	}
-	if voicePrompt != "Be concise." {
-		t.Fatalf("voice mode prompt=%q, want %q", voicePrompt, "Be concise.")
+	if !strings.Contains(voicePrompt, talkToUserSystemInstruction) {
+		t.Fatalf("missing voice instruction suffix: %q", voicePrompt)
 	}
 }
 
@@ -858,13 +852,11 @@ func TestWriteAudioUnavailableWarning_EmitsOncePerTurn(t *testing.T) {
 func TestResolveAssistantDisplay_NoDuplicateWhenTextStreamed(t *testing.T) {
 	t.Parallel()
 
-	result := &vai.RunResult{
-		Response: &vai.Response{
-			MessageResponse: &types.MessageResponse{
-				Type:    "message",
-				Role:    "assistant",
-				Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "fallback"}},
-			},
+	result := &types.RunResult{
+		Response: &types.MessageResponse{
+			Type:    "message",
+			Role:    "assistant",
+			Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "fallback"}},
 		},
 	}
 
@@ -880,13 +872,11 @@ func TestResolveAssistantDisplay_NoDuplicateWhenTextStreamed(t *testing.T) {
 func TestResolveAssistantDisplay_FallbackFromResultThenProcess(t *testing.T) {
 	t.Parallel()
 
-	result := &vai.RunResult{
-		Response: &vai.Response{
-			MessageResponse: &types.MessageResponse{
-				Type:    "message",
-				Role:    "assistant",
-				Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "from result"}},
-			},
+	result := &types.RunResult{
+		Response: &types.MessageResponse{
+			Type:    "message",
+			Role:    "assistant",
+			Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "from result"}},
 		},
 	}
 	text, shouldPrint := resolveAssistantDisplay(false, "", "from process", result)
@@ -908,7 +898,7 @@ func TestSyncHistoryFromRunResult_UsesResultMessages(t *testing.T) {
 			{Role: "user", Content: vai.Text("old")},
 		},
 	}
-	result := &vai.RunResult{
+	result := &types.RunResult{
 		Messages: []types.Message{
 			{Role: "user", Content: []types.ContentBlock{
 				types.TextBlock{Type: "text", Text: "new-user"},
@@ -943,13 +933,11 @@ func TestSyncHistoryFromRunResult_FallbackCopiesResponseContentSlice(t *testing.
 	orig := []types.ContentBlock{
 		types.TextBlock{Type: "text", Text: "x"},
 	}
-	result := &vai.RunResult{
-		Response: &vai.Response{
-			MessageResponse: &types.MessageResponse{
-				Type:    "message",
-				Role:    "assistant",
-				Content: orig,
-			},
+	result := &types.RunResult{
+		Response: &types.MessageResponse{
+			Type:    "message",
+			Role:    "assistant",
+			Content: orig,
 		},
 	}
 	syncHistoryFromRunResult(state, result, "")
@@ -978,13 +966,11 @@ func TestSyncHistoryFromRunResult_FallbackUsesAssistantText(t *testing.T) {
 			{Role: "user", Content: vai.Text("u1")},
 		},
 	}
-	result := &vai.RunResult{
-		Response: &vai.Response{
-			MessageResponse: &types.MessageResponse{
-				Type:    "message",
-				Role:    "assistant",
-				Content: nil,
-			},
+	result := &types.RunResult{
+		Response: &types.MessageResponse{
+			Type:    "message",
+			Role:    "assistant",
+			Content: nil,
 		},
 	}
 

@@ -318,6 +318,20 @@ func UnmarshalRunStreamEvent(data []byte) (RunStreamEvent, error) {
 		}
 		return event, nil
 
+	case "audio_chunk":
+		var event AudioChunkEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, err
+		}
+		return event, nil
+
+	case "audio_unavailable":
+		var event AudioUnavailableEvent
+		if err := json.Unmarshal(data, &event); err != nil {
+			return nil, err
+		}
+		return event, nil
+
 	case "error":
 		var event RunErrorEvent
 		if err := json.Unmarshal(data, &event); err != nil {

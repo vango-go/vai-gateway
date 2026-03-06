@@ -14,6 +14,7 @@ import (
 
 	"github.com/vango-go/vai-lite/internal/dotenv"
 	"github.com/vango-go/vai-lite/pkg/core"
+	"github.com/vango-go/vai-lite/pkg/core/types"
 	vai "github.com/vango-go/vai-lite/sdk"
 )
 
@@ -279,15 +280,31 @@ func buildChatTools(cfg chatConfig) []vai.ToolWithHandler {
 	if imageProvider, ok := preferredImageToolProvider(cfg); ok {
 		tools = append(tools, vai.VAIImage(imageProvider))
 	}
-	if !cfg.VoiceEnabled {
-		type talkToUserInput struct {
-			Content string `json:"content" desc:"Exact text to speak to the user"`
-		}
-		tools = append(tools, vai.MakeTool("talk_to_user", "Speak text directly to the user via the voice/output channel.", func(ctx context.Context, input talkToUserInput) (string, error) {
-			return "delivered", nil
-		}))
-	}
 	return tools
+}
+
+func buildServerToolsAndConfig(cfg chatConfig) ([]string, map[string]any) {
+	serverTools := []string{"vai_web_search", "vai_web_fetch"}
+	serverToolConfig := map[string]any{
+		"vai_web_search": map[string]any{"provider": "tavily"},
+		"vai_web_fetch":  map[string]any{"provider": "tavily"},
+	}
+	if imageProvider, ok := preferredImageToolProvider(cfg); ok {
+		serverTools = append(serverTools, "vai_image")
+		serverToolConfig["vai_image"] = map[string]any{"provider": string(imageProvider)}
+	}
+	return serverTools, serverToolConfig
+}
+
+func copyMap(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(src))
+	for key, value := range src {
+		out[key] = value
+	}
+	return out
 }
 
 func preferredImageToolProvider(cfg chatConfig) (vai.VAIProvider, bool) {
@@ -494,12 +511,8 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 
 	client := vai.NewClient(buildClientOptions(cfg)...)
 	chatTools := buildChatTools(cfg)
-	toolNames := make([]string, 0, len(chatTools))
-	for _, tool := range chatTools {
-		if name := strings.TrimSpace(tool.Tool.Name); name != "" {
-			toolNames = append(toolNames, name)
-		}
-	}
+	serverTools, serverToolConfig := buildServerToolsAndConfig(cfg)
+	toolNames := append([]string(nil), serverTools...)
 
 	fmt.Fprintf(out, "Proxy chatbot connected to %s using %s\n", cfg.BaseURL, cfg.Model)
 	if cfg.VoiceEnabled {
@@ -673,19 +686,31 @@ func runChatbot(ctx context.Context, cfg chatConfig, in io.Reader, out io.Writer
 			Content: userContent,
 		})
 
+		turnVoiceEnabled := shouldUseTurnVoice(cfg, audioWAV)
 		req := &vai.MessageRequest{
 			Model:     state.currentModel,
 			Messages:  state.history,
 			MaxTokens: cfg.MaxTokens,
+			System:    composeSystemPrompt(cfg.SystemPrompt, turnVoiceEnabled),
 		}
-		turnVoiceEnabled := shouldUseTurnVoice(cfg, audioWAV)
-		req.System = composeSystemPrompt(cfg.SystemPrompt, cfg.VoiceEnabled)
 		if turnVoiceEnabled {
 			req.Voice = vai.VoiceOutput(cfg.VoiceID)
 		}
 
 		turnCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
-		stream, err := client.Messages.RunStream(turnCtx, req, vai.WithTools(chatTools...), vai.WithBuildTurnMessages(buildProxyChatTurnMessages))
+		stream, err := client.Runs.Stream(turnCtx, &types.RunRequest{
+			Request: *req,
+			Run: types.RunConfig{
+				MaxTurns:      8,
+				MaxToolCalls:  20,
+				MaxTokens:     0,
+				TimeoutMS:     int(cfg.Timeout / time.Millisecond),
+				ParallelTools: true,
+				ToolTimeoutMS: int((30 * time.Second) / time.Millisecond),
+			},
+			ServerTools:      append([]string(nil), serverTools...),
+			ServerToolConfig: copyMap(serverToolConfig),
+		})
 		if err != nil {
 			cancel()
 			closePlayerWithDebug(turnPrewarmedPlayer, "prewarmed player cleanup")
@@ -842,7 +867,7 @@ func buildStreamCallbacks(out io.Writer, printState *streamPrintState, player *p
 	}
 }
 
-func resolveAssistantDisplay(sawText bool, streamedText string, processText string, result *vai.RunResult) (string, bool) {
+func resolveAssistantDisplay(sawText bool, streamedText string, processText string, result *types.RunResult) (string, bool) {
 	if sawText {
 		return strings.TrimSpace(streamedText), false
 	}
@@ -856,7 +881,7 @@ func resolveAssistantDisplay(sawText bool, streamedText string, processText stri
 	return text, text != ""
 }
 
-func syncHistoryFromRunResult(state *chatRuntime, result *vai.RunResult, assistantText string) {
+func syncHistoryFromRunResult(state *chatRuntime, result *types.RunResult, assistantText string) {
 	if state == nil {
 		return
 	}
@@ -882,9 +907,7 @@ func syncHistoryFromRunResult(state *chatRuntime, result *vai.RunResult, assista
 
 func composeSystemPrompt(userPrompt string, voiceEnabled bool) string {
 	base := strings.TrimSpace(userPrompt)
-	if voiceEnabled {
-		// When voice is enabled, the assistant's streamed text IS the speech.
-		// No talk_to_user tool, no special instruction needed.
+	if !voiceEnabled {
 		return base
 	}
 	enforced := strings.TrimSpace(talkToUserSystemInstruction)

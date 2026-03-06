@@ -88,7 +88,8 @@ func (f *trackingExecutor) MaxInFlight() int {
 }
 
 type scriptedProvider struct {
-	name string
+	name   string
+	vision bool
 
 	mu      sync.Mutex
 	calls   int
@@ -118,7 +119,7 @@ type streamItem struct {
 
 func (p *scriptedProvider) Name() string { return p.name }
 func (p *scriptedProvider) Capabilities() core.ProviderCapabilities {
-	return core.ProviderCapabilities{Tools: true, ToolStreaming: true}
+	return core.ProviderCapabilities{Tools: true, ToolStreaming: true, Vision: p.vision}
 }
 
 func (p *scriptedProvider) CreateMessage(ctx context.Context, req *types.MessageRequest) (*types.MessageResponse, error) {
@@ -352,8 +353,8 @@ func TestRunBlocking_InjectsImageRefsWithoutMutatingHistory(t *testing.T) {
 	}
 }
 
-func TestRunBlocking_PromotesImageToolResultsAndResolvesRefs(t *testing.T) {
-	provider := &scriptedProvider{name: "test", resps: []*types.MessageResponse{
+func TestRunBlocking_KeepsImageToolResultsCanonicalAndResolvesRefs(t *testing.T) {
+	provider := &scriptedProvider{name: "test", vision: true, resps: []*types.MessageResponse{
 		{
 			Type:       "message",
 			Role:       "assistant",
@@ -430,11 +431,28 @@ func TestRunBlocking_PromotesImageToolResultsAndResolvesRefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err=%v", err)
 	}
-	if result.Response == nil || result.Response.ImageContent() == nil {
-		t.Fatalf("expected promoted image in final response: %#v", result.Response)
+	if result.Response == nil || result.Response.TextContent() != "final" {
+		t.Fatalf("unexpected final response: %#v", result.Response)
 	}
 	if len(result.Messages) != 4 {
 		t.Fatalf("messages=%d, want 4", len(result.Messages))
+	}
+	if len(provider.reqs) != 2 {
+		t.Fatalf("provider requests=%d, want 2", len(provider.reqs))
+	}
+	secondTurnBlocks := provider.reqs[1].Messages[2].ContentBlocks()
+	secondTurnResult, ok := secondTurnBlocks[0].(types.ToolResultBlock)
+	if !ok {
+		t.Fatalf("second turn block=%T, want ToolResultBlock", secondTurnBlocks[0])
+	}
+	if len(secondTurnResult.Content) < 3 {
+		t.Fatalf("second turn tool result content=%#v", secondTurnResult.Content)
+	}
+	if tb, ok := secondTurnResult.Content[1].(types.TextBlock); !ok || tb.Text != "img-02" {
+		t.Fatalf("expected injected img-02 ref before generated image, got %#v", secondTurnResult.Content[1])
+	}
+	if _, ok := secondTurnResult.Content[2].(types.ImageBlock); !ok {
+		t.Fatalf("expected real generated image in multimodal planner history, got %T", secondTurnResult.Content[2])
 	}
 	toolMsgBlocks := result.Messages[2].ContentBlocks()
 	tr, ok := toolMsgBlocks[0].(types.ToolResultBlock)
@@ -446,8 +464,66 @@ func TestRunBlocking_PromotesImageToolResultsAndResolvesRefs(t *testing.T) {
 		t.Fatalf("tool metadata=%#v", tr.Content[0])
 	}
 	lastAssistant := result.Messages[3].ContentBlocks()
-	if !responseHasImage(lastAssistant) {
-		t.Fatalf("expected promoted image in assistant history: %#v", lastAssistant)
+	if len(lastAssistant) != 1 {
+		t.Fatalf("assistant history should remain text-only, got %#v", lastAssistant)
+	}
+	if _, ok := lastAssistant[0].(types.TextBlock); !ok {
+		t.Fatalf("assistant history should not duplicate image output: %#v", lastAssistant)
+	}
+}
+
+func TestRunBlocking_ReplacesImagesWithPlaceholdersForNonVisionPlanner(t *testing.T) {
+	provider := &scriptedProvider{name: "test", resps: []*types.MessageResponse{{
+		Type:       "message",
+		Role:       "assistant",
+		Model:      "m",
+		StopReason: types.StopReasonEndTurn,
+		Content:    []types.ContentBlock{types.TextBlock{Type: "text", Text: "done"}},
+	}}}
+
+	userHistory := []types.Message{{
+		Role: "user",
+		Content: []types.ContentBlock{
+			types.TextBlock{Type: "text", Text: "describe this"},
+			types.ImageBlock{
+				Type: "image",
+				Source: types.ImageSource{
+					Type:      "url",
+					URL:       "https://example.com/cat.png",
+					MediaType: "image/png",
+				},
+			},
+		},
+	}}
+
+	controller := &Controller{Provider: provider}
+	controller.Tools = toolExecutorFunc(func(ctx context.Context, name string, input map[string]any) ([]types.ContentBlock, *types.Error) {
+		return nil, nil
+	})
+	_, err := controller.RunBlocking(context.Background(), &types.RunRequest{
+		Request: types.MessageRequest{Model: "m", Messages: userHistory},
+		Run:     types.RunConfig{MaxTurns: 8, MaxToolCalls: 20, TimeoutMS: 60000, ParallelTools: true, ToolTimeoutMS: 30000},
+	})
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	if len(provider.reqs) != 1 {
+		t.Fatalf("provider requests=%d, want 1", len(provider.reqs))
+	}
+	blocks := provider.reqs[0].Messages[0].ContentBlocks()
+	if len(blocks) != 3 {
+		t.Fatalf("provider blocks=%d, want 3", len(blocks))
+	}
+	if tb, ok := blocks[1].(types.TextBlock); !ok || tb.Text != "img-01" {
+		t.Fatalf("expected img-01 ref, got %#v", blocks[1])
+	}
+	if tb, ok := blocks[2].(types.TextBlock); !ok || tb.Text != "[image omitted for non-vision model]" {
+		t.Fatalf("expected placeholder text, got %#v", blocks[2])
+	}
+	for _, block := range blocks {
+		if _, ok := block.(types.ImageBlock); ok {
+			t.Fatalf("non-vision planner request should not contain image block: %#v", blocks)
+		}
 	}
 }
 

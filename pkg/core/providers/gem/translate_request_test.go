@@ -168,6 +168,68 @@ func TestBuildGenerateContentRequest_MultimodalToolsAndThoughtSignature(t *testi
 	}
 }
 
+func TestBuildGenerateContentRequest_ToolResultIncludesMultimodalParts(t *testing.T) {
+	t.Parallel()
+
+	provider := NewDeveloper("test-key")
+	req := &types.MessageRequest{
+		Model: "gemini-2.5-flash",
+		Messages: []types.Message{
+			{
+				Role: "assistant",
+				Content: []types.ContentBlock{
+					types.ToolUseBlock{
+						Type:  "tool_use",
+						ID:    "call_1",
+						Name:  "edit_image",
+						Input: map[string]any{"prompt": "make it dramatic"},
+					},
+				},
+			},
+			{
+				Role: "user",
+				Content: []types.ContentBlock{
+					types.ToolResultBlock{
+						Type:      "tool_result",
+						ToolUseID: "call_1",
+						Content: []types.ContentBlock{
+							types.TextBlock{Type: "text", Text: `{"generated_image_ids":["img-02"]}`},
+							types.ImageBlock{
+								Type: "image",
+								Source: types.ImageSource{
+									Type:      "base64",
+									MediaType: "image/png",
+									Data:      base64.StdEncoding.EncodeToString([]byte("hello")),
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	build, err := provider.buildGenerateContentRequest(req, defaultBuildRequestOptions())
+	if err != nil {
+		t.Fatalf("buildGenerateContentRequest error: %v", err)
+	}
+	if len(build.contents) != 2 {
+		t.Fatalf("contents len = %d, want 2", len(build.contents))
+	}
+	if len(build.contents[1].Parts) != 3 {
+		t.Fatalf("tool result parts len = %d, want 3", len(build.contents[1].Parts))
+	}
+	if build.contents[1].Parts[0].FunctionResponse == nil {
+		t.Fatalf("first part should be function response")
+	}
+	if build.contents[1].Parts[1].Text != `{"generated_image_ids":["img-02"]}` {
+		t.Fatalf("second part text = %q", build.contents[1].Parts[1].Text)
+	}
+	if build.contents[1].Parts[2].InlineData == nil || build.contents[1].Parts[2].InlineData.MIMEType != "image/png" {
+		t.Fatalf("third part = %#v, want inline image data", build.contents[1].Parts[2])
+	}
+}
+
 func TestBuildGenerateContentRequest_Validation(t *testing.T) {
 	t.Parallel()
 

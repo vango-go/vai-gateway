@@ -105,6 +105,13 @@ func (p *Provider) translateMessages(messages []types.Message) []inputItem {
 					CallID: tr.ToolUseID,
 					Output: p.toolResultToString(tr.Content),
 				})
+				if p.toolResultNeedsMultimodalMessage(tr.Content) {
+					items = append(items, inputItem{
+						Type:    "message",
+						Role:    "user",
+						Content: p.translateContentParts(tr.Content),
+					})
+				}
 			}
 		}
 
@@ -266,6 +273,16 @@ func (p *Provider) toolResultToString(content []types.ContentBlock) string {
 		}
 	}
 	return result.String()
+}
+
+func (p *Provider) toolResultNeedsMultimodalMessage(content []types.ContentBlock) bool {
+	for _, block := range content {
+		switch block.(type) {
+		case types.ImageBlock, types.AudioBlock, types.VideoBlock, types.DocumentBlock:
+			return true
+		}
+	}
+	return false
 }
 
 // translateOutputFormat converts Vango output format to Responses API text config.

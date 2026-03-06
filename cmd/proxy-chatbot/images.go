@@ -16,8 +16,6 @@ import (
 	"time"
 
 	"github.com/vango-go/vai-lite/pkg/core/types"
-	"github.com/vango-go/vai-lite/pkg/gateway/tools/servertools"
-	vai "github.com/vango-go/vai-lite/sdk"
 )
 
 type chatImageAsset struct {
@@ -262,91 +260,4 @@ func urlPath(raw string) string {
 		return raw
 	}
 	return parsed.Path
-}
-
-func buildProxyChatTurnMessages(info vai.TurnInfo) []types.Message {
-	return compactChatHistoryForModel(info.History)
-}
-
-func compactChatHistoryForModel(history []types.Message) []types.Message {
-	if len(history) == 0 {
-		return nil
-	}
-	toolNameByID := make(map[string]string)
-	out := make([]types.Message, 0, len(history))
-	for i := range history {
-		msg := history[i]
-		blocks := msg.ContentBlocks()
-		if len(blocks) == 0 {
-			out = append(out, msg)
-		} else {
-			out = append(out, types.Message{
-				Role:    msg.Role,
-				Content: compactBlocksForModel(blocks, toolNameByID),
-			})
-		}
-		if strings.EqualFold(strings.TrimSpace(msg.Role), "assistant") {
-			for _, block := range blocks {
-				switch b := block.(type) {
-				case types.ToolUseBlock:
-					toolNameByID[b.ID] = strings.TrimSpace(b.Name)
-				case *types.ToolUseBlock:
-					if b != nil {
-						toolNameByID[b.ID] = strings.TrimSpace(b.Name)
-					}
-				}
-			}
-		}
-	}
-	return out
-}
-
-func compactBlocksForModel(blocks []types.ContentBlock, toolNameByID map[string]string) []types.ContentBlock {
-	out := make([]types.ContentBlock, 0, len(blocks))
-	for i := range blocks {
-		switch b := blocks[i].(type) {
-		case types.ImageBlock, *types.ImageBlock:
-			out = append(out, types.TextBlock{Type: "text", Text: "[generated image omitted from demo model context]"})
-		case types.ToolResultBlock:
-			if strings.EqualFold(strings.TrimSpace(toolNameByID[b.ToolUseID]), servertools.ToolImage) {
-				out = append(out, compactImageToolResultBlock(b))
-			} else {
-				out = append(out, b)
-			}
-		case *types.ToolResultBlock:
-			if b == nil {
-				continue
-			}
-			if strings.EqualFold(strings.TrimSpace(toolNameByID[b.ToolUseID]), servertools.ToolImage) {
-				out = append(out, compactImageToolResultBlock(*b))
-			} else {
-				out = append(out, *b)
-			}
-		default:
-			out = append(out, blocks[i])
-		}
-	}
-	return out
-}
-
-func compactImageToolResultBlock(block types.ToolResultBlock) types.ToolResultBlock {
-	compacted := types.ToolResultBlock{
-		Type:      block.Type,
-		ToolUseID: block.ToolUseID,
-		IsError:   block.IsError,
-	}
-	content := make([]types.ContentBlock, 0, len(block.Content)+1)
-	for i := range block.Content {
-		switch b := block.Content[i].(type) {
-		case types.TextBlock:
-			content = append(content, b)
-		case *types.TextBlock:
-			if b != nil {
-				content = append(content, *b)
-			}
-		}
-	}
-	content = append(content, types.TextBlock{Type: "text", Text: "[generated image delivered to the user in the demo client]"})
-	compacted.Content = content
-	return compacted
 }

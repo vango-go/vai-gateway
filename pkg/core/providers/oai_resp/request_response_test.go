@@ -118,6 +118,71 @@ func TestBuildRequest_ReasoningModelExtensionsAndToolTranslation(t *testing.T) {
 	}
 }
 
+func TestBuildRequest_AddsSyntheticMessageForMultimodalToolResult(t *testing.T) {
+	p := &Provider{}
+	req := &types.MessageRequest{
+		Model: "gpt-5-mini",
+		Messages: []types.Message{
+			{
+				Role: "assistant",
+				Content: []types.ContentBlock{
+					types.ToolUseBlock{
+						Type:  "tool_use",
+						ID:    "call_1",
+						Name:  "edit_image",
+						Input: map[string]any{"prompt": "make it dramatic"},
+					},
+				},
+			},
+			{
+				Role: "user",
+				Content: []types.ContentBlock{
+					types.ToolResultBlock{
+						Type:      "tool_result",
+						ToolUseID: "call_1",
+						Content: []types.ContentBlock{
+							types.TextBlock{Type: "text", Text: `{"generated_image_ids":["img-02"]}`},
+							types.ImageBlock{
+								Type: "image",
+								Source: types.ImageSource{
+									Type:      "base64",
+									MediaType: "image/png",
+									Data:      "aGVsbG8=",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	translated := p.buildRequest(req)
+	inputItems, ok := translated.Input.([]inputItem)
+	if !ok {
+		t.Fatalf("input type = %T, want []inputItem", translated.Input)
+	}
+	if len(inputItems) != 3 {
+		t.Fatalf("input len = %d, want 3", len(inputItems))
+	}
+	if inputItems[1].Type != "function_call_output" {
+		t.Fatalf("inputItems[1].Type = %q, want function_call_output", inputItems[1].Type)
+	}
+	if inputItems[2].Type != "message" || inputItems[2].Role != "user" {
+		t.Fatalf("inputItems[2] = %#v, want synthetic user message", inputItems[2])
+	}
+	contentParts, ok := inputItems[2].Content.([]contentPart)
+	if !ok {
+		t.Fatalf("synthetic content type = %T, want []contentPart", inputItems[2].Content)
+	}
+	if len(contentParts) != 2 {
+		t.Fatalf("synthetic content len = %d, want 2", len(contentParts))
+	}
+	if contentParts[1].Type != "input_image" {
+		t.Fatalf("synthetic image part = %#v", contentParts[1])
+	}
+}
+
 func TestParseResponse_MapsOutputItemsAndUsageMetadata(t *testing.T) {
 	p := &Provider{}
 	body := []byte(`{

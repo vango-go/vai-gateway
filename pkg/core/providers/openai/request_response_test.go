@@ -128,6 +128,68 @@ func TestBuildRequest_TranslatesMessagesToolsAndSchema(t *testing.T) {
 	}
 }
 
+func TestBuildRequest_AddsSyntheticUserMessageForMultimodalToolResult(t *testing.T) {
+	p := New("test-key")
+
+	req := &types.MessageRequest{
+		Model: "gpt-4o",
+		Messages: []types.Message{
+			{
+				Role: "assistant",
+				Content: []types.ContentBlock{
+					types.ToolUseBlock{
+						Type:  "tool_use",
+						ID:    "call_1",
+						Name:  "edit_image",
+						Input: map[string]any{"prompt": "make it dramatic"},
+					},
+				},
+			},
+			{
+				Role: "user",
+				Content: []types.ContentBlock{
+					types.ToolResultBlock{
+						Type:      "tool_result",
+						ToolUseID: "call_1",
+						Content: []types.ContentBlock{
+							types.TextBlock{Type: "text", Text: `{"generated_image_ids":["img-02"]}`},
+							types.ImageBlock{
+								Type: "image",
+								Source: types.ImageSource{
+									Type:      "base64",
+									MediaType: "image/png",
+									Data:      "aGVsbG8=",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	translated := p.buildRequest(req)
+	if len(translated.Messages) != 3 {
+		t.Fatalf("translated messages len = %d, want 3", len(translated.Messages))
+	}
+	if translated.Messages[1].Role != "tool" || translated.Messages[1].ToolCallID != "call_1" {
+		t.Fatalf("tool result message = %#v", translated.Messages[1])
+	}
+	if translated.Messages[2].Role != "user" {
+		t.Fatalf("synthetic multimodal message role = %q, want user", translated.Messages[2].Role)
+	}
+	parts, ok := translated.Messages[2].Content.([]contentPart)
+	if !ok {
+		t.Fatalf("synthetic content type = %T, want []contentPart", translated.Messages[2].Content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("synthetic content parts len = %d, want 2", len(parts))
+	}
+	if parts[1].ImageURL == nil || parts[1].ImageURL.URL != "data:image/png;base64,aGVsbG8=" {
+		t.Fatalf("synthetic image part = %#v", parts[1])
+	}
+}
+
 func TestParseResponse_MapsTextToolUseStopReasonAndUsage(t *testing.T) {
 	p := New("test-key")
 

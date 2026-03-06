@@ -58,9 +58,6 @@ func (c *Client) executeGatewayServerTool(ctx context.Context, toolName string, 
 			toolName: map[string]any{"provider": provider},
 		},
 	}
-	if execCtx := serverToolExecutionContextFromContext(ctx); execCtx != nil {
-		payload.ExecutionContext = execCtx
-	}
 
 	resp, endpoint, err := c.postGatewayJSON(ctx, "/v1/server-tools:execute", payload, headers)
 	if err != nil {

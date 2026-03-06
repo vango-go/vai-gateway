@@ -527,7 +527,7 @@ func (s *MessagesService) runLoop(ctx context.Context, req *MessageRequest, cfg 
 		}
 
 		// Execute tool calls
-		toolResults := s.executeToolCalls(ctx, toolUses, history, cfg)
+		toolResults := s.executeToolCalls(ctx, toolUses, cfg)
 
 		step.ToolCalls = make([]ToolCall, len(toolUses))
 		for i, tu := range toolUses {
@@ -548,9 +548,8 @@ func (s *MessagesService) runLoop(ctx context.Context, req *MessageRequest, cfg 
 }
 
 // executeToolCalls executes all tool calls, either in parallel or sequentially.
-func (s *MessagesService) executeToolCalls(ctx context.Context, toolUses []types.ToolUseBlock, history []types.Message, cfg *runConfig) []ToolExecutionResult {
+func (s *MessagesService) executeToolCalls(ctx context.Context, toolUses []types.ToolUseBlock, cfg *runConfig) []ToolExecutionResult {
 	results := make([]ToolExecutionResult, len(toolUses))
-	execCtx := buildServerToolExecutionContext(history)
 
 	if cfg.parallelTools && len(toolUses) > 1 {
 		// Execute in parallel
@@ -561,7 +560,7 @@ func (s *MessagesService) executeToolCalls(ctx context.Context, toolUses []types
 			wg.Add(1)
 			go func(idx int, toolUse types.ToolUseBlock) {
 				defer wg.Done()
-				result := s.executeToolCall(ctx, toolUse, execCtx, cfg)
+				result := s.executeToolCall(ctx, toolUse, cfg)
 				mu.Lock()
 				results[idx] = result
 				mu.Unlock()
@@ -571,7 +570,7 @@ func (s *MessagesService) executeToolCalls(ctx context.Context, toolUses []types
 	} else {
 		// Execute sequentially
 		for i, tu := range toolUses {
-			results[i] = s.executeToolCall(ctx, tu, execCtx, cfg)
+			results[i] = s.executeToolCall(ctx, tu, cfg)
 		}
 	}
 
@@ -579,7 +578,7 @@ func (s *MessagesService) executeToolCalls(ctx context.Context, toolUses []types
 }
 
 // executeToolCall executes a single tool call.
-func (s *MessagesService) executeToolCall(ctx context.Context, toolUse types.ToolUseBlock, execCtx *types.ServerToolExecutionContext, cfg *runConfig) ToolExecutionResult {
+func (s *MessagesService) executeToolCall(ctx context.Context, toolUse types.ToolUseBlock, cfg *runConfig) ToolExecutionResult {
 	result := ToolExecutionResult{
 		ToolUseID: toolUse.ID,
 	}
@@ -620,7 +619,6 @@ func (s *MessagesService) executeToolCall(ctx context.Context, toolUse types.Too
 
 	// Execute handler with SDK client bound in context for gateway-native tool handlers.
 	toolCtx := contextWithToolExecutionClient(ctx, s.client)
-	toolCtx = contextWithServerToolExecutionContext(toolCtx, execCtx)
 	output, err := handler(toolCtx, inputJSON)
 
 	// Call hook
@@ -1716,11 +1714,10 @@ func (rs *RunStream) run(ctx context.Context, svc *MessagesService, req *Message
 
 		// Execute tools with events
 		toolResults := make([]ToolExecutionResult, len(toolUses))
-		execCtx := buildServerToolExecutionContext(snapshotHistory())
 		for i, tu := range toolUses {
 			rs.send(ToolCallStartEvent{ID: tu.ID, Name: tu.Name, Input: tu.Input})
 
-			tr := svc.executeToolCall(ctx, tu, execCtx, cfg)
+			tr := svc.executeToolCall(ctx, tu, cfg)
 			toolResults[i] = tr
 
 			rs.send(ToolResultEvent{ID: tu.ID, Name: tu.Name, Content: tr.Content, Error: tr.Error})

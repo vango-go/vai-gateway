@@ -519,7 +519,6 @@ func (s *LiveSession) executeToolCall(ev types.LiveToolCallEvent) {
 		}
 		defer cancel()
 		toolCtx = contextWithToolExecutionClient(toolCtx, s.client)
-		toolCtx = contextWithServerToolExecutionContext(toolCtx, buildServerToolExecutionContext(s.HistorySnapshot()))
 
 		output, callErr := handler(toolCtx, inputJSON)
 		if callErr != nil {

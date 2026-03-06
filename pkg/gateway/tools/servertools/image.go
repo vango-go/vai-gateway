@@ -130,6 +130,14 @@ func (e *ImageExecutor) generateWithGemini(ctx context.Context, req imageGenerat
 	blocks := make([]types.ContentBlock, 0, 1+len(req.Images))
 	blocks = append(blocks, types.TextBlock{Type: "text", Text: req.Prompt})
 	reg := ImageRefRegistryFromContext(ctx)
+	if len(req.Images) > 0 && reg == nil {
+		return nil, &types.Error{
+			Type:    string(core.ErrInvalidRequest),
+			Message: "image id references require /v1/runs, /v1/runs:stream, or /v1/live; /v1/server-tools:execute is stateless",
+			Param:   "images[0].id",
+			Code:    "run_validation_failed",
+		}
+	}
 	for i := range req.Images {
 		img, ok := reg.Lookup(req.Images[i].ID)
 		if !ok {

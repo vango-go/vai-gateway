@@ -91,7 +91,6 @@ func (c *Controller) run(ctx context.Context, req *types.RunRequest, emit EmitFu
 	copy(history, workingReq.Messages)
 
 	result := &types.RunResult{Steps: make([]types.RunStep, 0, 4)}
-	var pendingPromotedImages []types.ContentBlock
 
 	snapshotHistory := func() []types.Message {
 		out := make([]types.Message, len(history))
@@ -132,10 +131,10 @@ func (c *Controller) run(ctx context.Context, req *types.RunRequest, emit EmitFu
 
 		stepStart := time.Now()
 
-		imageRefs := servertools.BuildImageRefRegistry(history)
+		plannerMessages, imageRefs := servertools.BuildPlannerMessages(history, c.Provider.Capabilities().Vision)
 		turnReq := &types.MessageRequest{
 			Model:         workingReq.Model,
-			Messages:      servertools.InjectImageRefText(history, imageRefs),
+			Messages:      plannerMessages,
 			MaxTokens:     workingReq.MaxTokens,
 			System:        workingReq.System,
 			Temperature:   workingReq.Temperature,
@@ -188,10 +187,6 @@ func (c *Controller) run(ctx context.Context, req *types.RunRequest, emit EmitFu
 
 		toolUses := resp.ToolUses()
 		if resp.StopReason != types.StopReasonToolUse || len(toolUses) == 0 {
-			if len(pendingPromotedImages) > 0 && !responseHasImage(resp.Content) {
-				resp.Content = append(append([]types.ContentBlock(nil), resp.Content...), pendingPromotedImages...)
-			}
-			pendingPromotedImages = nil
 			if req.Request.Voice != nil && req.Request.Voice.Output != nil {
 				if err := voice.AppendVoiceOutputToMessageResponse(ctx, c.VoicePipeline, req.Request.Voice, req.Request.TTSModel, resp); err != nil {
 					result.StopReason = types.RunStopReasonError
@@ -261,9 +256,6 @@ func (c *Controller) run(ctx context.Context, req *types.RunRequest, emit EmitFu
 			if ex.call.Name == servertools.ToolImage {
 				ex.result.Content = servertools.FinalizeImageToolResultContent(ex.result.Content, imageRefs)
 				execRes[i].result.Content = ex.result.Content
-				if !ex.result.IsError {
-					pendingPromotedImages = append(pendingPromotedImages, servertools.PromoteImageToolResultContent(ex.result.Content)...)
-				}
 			}
 			step.ToolResults[i] = ex.result
 			toolResultBlocks[i] = types.ToolResultBlock{Type: "tool_result", ToolUseID: ex.result.ToolUseID, Content: ex.result.Content, IsError: ex.result.IsError}
@@ -341,16 +333,6 @@ func (c *Controller) executeTools(ctx context.Context, uses []types.ToolUseBlock
 		runOne(i, tu)
 	}
 	return results
-}
-
-func responseHasImage(blocks []types.ContentBlock) bool {
-	for i := range blocks {
-		switch blocks[i].(type) {
-		case types.ImageBlock, *types.ImageBlock:
-			return true
-		}
-	}
-	return false
 }
 
 func (c *Controller) streamTurn(ctx context.Context, req *types.MessageRequest, emit EmitFunc) (*types.MessageResponse, error) {

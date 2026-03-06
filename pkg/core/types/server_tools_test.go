@@ -25,39 +25,6 @@ func TestUnmarshalServerToolExecuteRequestStrict_Basic(t *testing.T) {
 	}
 }
 
-func TestUnmarshalServerToolExecuteRequestStrict_ExecutionContext(t *testing.T) {
-	req, err := UnmarshalServerToolExecuteRequestStrict([]byte(`{
-		"tool":"vai_image",
-		"input":{"prompt":"edit it","images":[{"id":"img-01"}]},
-		"execution_context":{
-			"images":[
-				{
-					"id":"img-01",
-					"image":{
-						"type":"image",
-						"source":{"type":"base64","media_type":"image/png","data":"Zm9v"}
-					}
-				}
-			]
-		}
-	}`))
-	if err != nil {
-		t.Fatalf("UnmarshalServerToolExecuteRequestStrict() error = %v", err)
-	}
-	if req.ExecutionContext == nil {
-		t.Fatal("expected execution_context")
-	}
-	if len(req.ExecutionContext.Images) != 1 {
-		t.Fatalf("len(execution_context.images)=%d", len(req.ExecutionContext.Images))
-	}
-	if req.ExecutionContext.Images[0].ID != "img-01" {
-		t.Fatalf("execution_context.images[0].id=%q", req.ExecutionContext.Images[0].ID)
-	}
-	if req.ExecutionContext.Images[0].Image.BlockType() != "image" {
-		t.Fatalf("execution_context.images[0].image type=%q", req.ExecutionContext.Images[0].Image.BlockType())
-	}
-}
-
 func TestUnmarshalServerToolExecuteRequestStrict_UnknownField(t *testing.T) {
 	_, err := UnmarshalServerToolExecuteRequestStrict([]byte(`{"tool":"vai_web_search","input":{"query":"x"},"extra":true}`))
 	if err == nil {
@@ -84,11 +51,6 @@ func TestUnmarshalServerToolExecuteRequestStrict_InputValidation(t *testing.T) {
 		{name: "input non-object", body: `{"tool":"vai_web_search","input":"nope"}`, param: "input"},
 		{name: "config non-object", body: `{"tool":"vai_web_search","input":{},"server_tool_config":"nope"}`, param: "server_tool_config"},
 		{name: "config entry non-object", body: `{"tool":"vai_web_search","input":{},"server_tool_config":{"vai_web_search":"nope"}}`, param: "server_tool_config.vai_web_search"},
-		{name: "execution context unknown field", body: `{"tool":"vai_image","input":{"prompt":"x"},"execution_context":{"extra":true}}`, param: "execution_context.extra"},
-		{name: "execution context images non-array", body: `{"tool":"vai_image","input":{"prompt":"x"},"execution_context":{"images":"nope"}}`, param: "execution_context.images"},
-		{name: "execution context image missing id", body: `{"tool":"vai_image","input":{"prompt":"x"},"execution_context":{"images":[{"image":{"type":"image","source":{"type":"base64","media_type":"image/png","data":"Zm9v"}}}]}}`, param: "execution_context.images[0].id"},
-		{name: "execution context image wrong type", body: `{"tool":"vai_image","input":{"prompt":"x"},"execution_context":{"images":[{"id":"img-01","image":{"type":"text","text":"oops"}}]}}`, param: "execution_context.images[0].image"},
-		{name: "execution context duplicate ids", body: `{"tool":"vai_image","input":{"prompt":"x"},"execution_context":{"images":[{"id":"img-01","image":{"type":"image","source":{"type":"base64","media_type":"image/png","data":"Zm9v"}}},{"id":"img-01","image":{"type":"image","source":{"type":"base64","media_type":"image/png","data":"YmFy"}}}]}}`, param: "execution_context.images"},
 	}
 
 	for _, tc := range tests {

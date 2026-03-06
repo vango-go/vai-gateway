@@ -219,7 +219,7 @@ func (p *Provider) buildGenerateContentRequest(req *types.MessageRequest, opts b
 		parts := make([]*genai.Part, 0, len(blocks))
 		for j := range blocks {
 			b := blocks[j]
-			part, extraWarnings, err := p.translateInputBlock(b, ext, &totalInlineBytes, toolUseNameByID)
+			blockParts, extraWarnings, err := p.translateInputParts(b, ext, &totalInlineBytes, toolUseNameByID)
 			if err != nil {
 				param := fmt.Sprintf("messages[%d].content[%d]", i, j)
 				if ce, ok := err.(*core.Error); ok {
@@ -231,8 +231,8 @@ func (p *Provider) buildGenerateContentRequest(req *types.MessageRequest, opts b
 				return nil, core.NewInvalidRequestErrorWithParam(err.Error(), param)
 			}
 			warnings = append(warnings, extraWarnings...)
-			if part != nil {
-				parts = append(parts, part)
+			if len(blockParts) > 0 {
+				parts = append(parts, blockParts...)
 			}
 
 			if tu, ok := asToolUseBlock(b); ok {
@@ -684,72 +684,132 @@ func jsonSchemaToMap(s *types.JSONSchema) map[string]any {
 	return m
 }
 
-func (p *Provider) translateInputBlock(block types.ContentBlock, ext gemExtensions, totalInlineBytes *int64, toolUseNameByID map[string]string) (*genai.Part, []string, error) {
+func (p *Provider) translateInputParts(block types.ContentBlock, ext gemExtensions, totalInlineBytes *int64, toolUseNameByID map[string]string) ([]*genai.Part, []string, error) {
 	warnings := make([]string, 0, 1)
 	switch b := block.(type) {
 	case types.TextBlock:
-		return genai.NewPartFromText(b.Text), warnings, nil
+		return []*genai.Part{genai.NewPartFromText(b.Text)}, warnings, nil
 	case *types.TextBlock:
 		if b == nil {
 			return nil, warnings, nil
 		}
-		return genai.NewPartFromText(b.Text), warnings, nil
+		return []*genai.Part{genai.NewPartFromText(b.Text)}, warnings, nil
 	case types.ThinkingBlock:
 		part := genai.NewPartFromText(b.Thinking)
 		part.Thought = true
-		return part, warnings, nil
+		return []*genai.Part{part}, warnings, nil
 	case *types.ThinkingBlock:
 		if b == nil {
 			return nil, warnings, nil
 		}
 		part := genai.NewPartFromText(b.Thinking)
 		part.Thought = true
-		return part, warnings, nil
+		return []*genai.Part{part}, warnings, nil
 	case types.ToolUseBlock:
-		return encodeToolUseBlock(b)
+		part, extraWarnings, err := encodeToolUseBlock(b)
+		if part == nil || err != nil {
+			return nil, extraWarnings, err
+		}
+		return []*genai.Part{part}, extraWarnings, nil
 	case *types.ToolUseBlock:
 		if b == nil {
 			return nil, warnings, nil
 		}
-		return encodeToolUseBlock(*b)
+		part, extraWarnings, err := encodeToolUseBlock(*b)
+		if part == nil || err != nil {
+			return nil, extraWarnings, err
+		}
+		return []*genai.Part{part}, extraWarnings, nil
 	case types.ToolResultBlock:
-		return encodeToolResultBlock(b, toolUseNameByID)
+		return p.encodeToolResultParts(b, ext, totalInlineBytes, toolUseNameByID)
 	case *types.ToolResultBlock:
 		if b == nil {
 			return nil, warnings, nil
 		}
-		return encodeToolResultBlock(*b, toolUseNameByID)
+		return p.encodeToolResultParts(*b, ext, totalInlineBytes, toolUseNameByID)
 	case types.ImageBlock:
-		return p.encodeImageBlock(b, ext, totalInlineBytes)
+		part, extraWarnings, err := p.encodeImageBlock(b, ext, totalInlineBytes)
+		if part == nil || err != nil {
+			return nil, extraWarnings, err
+		}
+		return []*genai.Part{part}, extraWarnings, nil
 	case *types.ImageBlock:
 		if b == nil {
 			return nil, warnings, nil
 		}
-		return p.encodeImageBlock(*b, ext, totalInlineBytes)
+		part, extraWarnings, err := p.encodeImageBlock(*b, ext, totalInlineBytes)
+		if part == nil || err != nil {
+			return nil, extraWarnings, err
+		}
+		return []*genai.Part{part}, extraWarnings, nil
 	case types.AudioBlock:
-		return encodeAudioBlock(b, ext, totalInlineBytes)
+		part, extraWarnings, err := encodeAudioBlock(b, ext, totalInlineBytes)
+		if part == nil || err != nil {
+			return nil, extraWarnings, err
+		}
+		return []*genai.Part{part}, extraWarnings, nil
 	case *types.AudioBlock:
 		if b == nil {
 			return nil, warnings, nil
 		}
-		return encodeAudioBlock(*b, ext, totalInlineBytes)
+		part, extraWarnings, err := encodeAudioBlock(*b, ext, totalInlineBytes)
+		if part == nil || err != nil {
+			return nil, extraWarnings, err
+		}
+		return []*genai.Part{part}, extraWarnings, nil
 	case types.VideoBlock:
-		return encodeVideoBlock(b, ext, totalInlineBytes)
+		part, extraWarnings, err := encodeVideoBlock(b, ext, totalInlineBytes)
+		if part == nil || err != nil {
+			return nil, extraWarnings, err
+		}
+		return []*genai.Part{part}, extraWarnings, nil
 	case *types.VideoBlock:
 		if b == nil {
 			return nil, warnings, nil
 		}
-		return encodeVideoBlock(*b, ext, totalInlineBytes)
+		part, extraWarnings, err := encodeVideoBlock(*b, ext, totalInlineBytes)
+		if part == nil || err != nil {
+			return nil, extraWarnings, err
+		}
+		return []*genai.Part{part}, extraWarnings, nil
 	case types.DocumentBlock:
-		return encodeDocumentBlock(b, ext, totalInlineBytes)
+		part, extraWarnings, err := encodeDocumentBlock(b, ext, totalInlineBytes)
+		if part == nil || err != nil {
+			return nil, extraWarnings, err
+		}
+		return []*genai.Part{part}, extraWarnings, nil
 	case *types.DocumentBlock:
 		if b == nil {
 			return nil, warnings, nil
 		}
-		return encodeDocumentBlock(*b, ext, totalInlineBytes)
+		part, extraWarnings, err := encodeDocumentBlock(*b, ext, totalInlineBytes)
+		if part == nil || err != nil {
+			return nil, extraWarnings, err
+		}
+		return []*genai.Part{part}, extraWarnings, nil
 	default:
 		return nil, warnings, core.NewInvalidRequestError("unsupported content block for Gemini provider")
 	}
+}
+
+func (p *Provider) encodeToolResultParts(b types.ToolResultBlock, ext gemExtensions, totalInlineBytes *int64, names map[string]string) ([]*genai.Part, []string, error) {
+	part, warnings, err := encodeToolResultBlock(b, names)
+	if err != nil {
+		return nil, warnings, err
+	}
+	parts := make([]*genai.Part, 0, len(b.Content)+1)
+	if part != nil {
+		parts = append(parts, part)
+	}
+	for i := range b.Content {
+		childParts, childWarnings, childErr := p.translateInputParts(b.Content[i], ext, totalInlineBytes, names)
+		if childErr != nil {
+			return nil, append(warnings, childWarnings...), childErr
+		}
+		warnings = append(warnings, childWarnings...)
+		parts = append(parts, childParts...)
+	}
+	return parts, warnings, nil
 }
 
 func encodeToolUseBlock(b types.ToolUseBlock) (*genai.Part, []string, error) {

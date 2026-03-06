@@ -60,6 +60,43 @@ func TestBuildImageRefRegistryAndInjectImageRefText(t *testing.T) {
 	}
 }
 
+func TestBuildPlannerMessages_NonVisionUsesPlaceholderText(t *testing.T) {
+	t.Parallel()
+
+	image := types.ImageBlock{
+		Type: "image",
+		Source: types.ImageSource{
+			Type:      "url",
+			URL:       "https://example.com/cat.png",
+			MediaType: "image/png",
+		},
+	}
+	history := []types.Message{{
+		Role: "user",
+		Content: []types.ContentBlock{
+			types.TextBlock{Type: "text", Text: "look"},
+			image,
+		},
+	}}
+
+	plannerMessages, _ := BuildPlannerMessages(history, false)
+	blocks := plannerMessages[0].ContentBlocks()
+	if len(blocks) != 3 {
+		t.Fatalf("planner blocks=%d, want 3", len(blocks))
+	}
+	if tb, ok := blocks[1].(types.TextBlock); !ok || tb.Text != "img-01" {
+		t.Fatalf("blocks[1]=%#v, want img-01 text block", blocks[1])
+	}
+	if tb, ok := blocks[2].(types.TextBlock); !ok || tb.Text != "[image omitted for non-vision model]" {
+		t.Fatalf("blocks[2]=%#v, want placeholder text", blocks[2])
+	}
+	for _, block := range blocks {
+		if _, ok := block.(types.ImageBlock); ok {
+			t.Fatalf("non-vision planner blocks should not include an image: %#v", blocks)
+		}
+	}
+}
+
 func TestImageExecutorExecute_ValidatesInput(t *testing.T) {
 	t.Parallel()
 

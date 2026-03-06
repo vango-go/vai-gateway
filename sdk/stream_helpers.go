@@ -1,6 +1,7 @@
 package vai
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 
@@ -157,44 +158,50 @@ func ToolUseStopFrom(event RunStreamEvent) (index int, ok bool) {
 //	    OnTextDelta:  func(t string) { fmt.Print(t) },
 //	})
 func (rs *RunStream) Process(callbacks StreamCallbacks) (string, error) {
+	return processRunEvents(rs.Events(), rs.Err, callbacks)
+}
+
+// Process consumes a /v1/runs:stream server-side run stream with the same callback
+// surface as RunStream.Process.
+func (s *RunsStream) Process(callbacks StreamCallbacks) (string, error) {
+	if s == nil {
+		return "", nil
+	}
+	return processGatewayRunEvents(s.Events(), s.Err, callbacks)
+}
+
+func processRunEvents(events <-chan RunStreamEvent, errFn func() error, callbacks StreamCallbacks) (string, error) {
 	var text strings.Builder
 	toolMetaByIndex := make(map[int]toolStreamMeta)
 
-	for event := range rs.Events() {
+	for event := range events {
 		switch e := event.(type) {
 		case StreamEventWrapper:
-			rs.processStreamEvent(e.Event, &text, callbacks, toolMetaByIndex)
-
+			processCommonStreamEvent(e.Event, &text, callbacks, toolMetaByIndex)
 		case AudioChunkEvent:
 			if callbacks.OnAudioChunk != nil {
 				callbacks.OnAudioChunk(e.Data, e.Format)
 			}
-
 		case AudioUnavailableEvent:
 			if callbacks.OnAudioUnavailable != nil {
 				callbacks.OnAudioUnavailable(e.Reason, e.Message)
 			}
-
 		case StepStartEvent:
 			if callbacks.OnStepStart != nil {
 				callbacks.OnStepStart(e.Index)
 			}
-
 		case StepCompleteEvent:
 			if callbacks.OnStepComplete != nil {
 				callbacks.OnStepComplete(e.Index, e.Response)
 			}
-
 		case ToolCallStartEvent:
 			if callbacks.OnToolCallStart != nil {
 				callbacks.OnToolCallStart(e.ID, e.Name, e.Input)
 			}
-
 		case ToolResultEvent:
 			if callbacks.OnToolResult != nil {
 				callbacks.OnToolResult(e.ID, e.Name, e.Content, e.Error)
 			}
-
 		case InterruptedEvent:
 			if callbacks.OnInterrupted != nil {
 				callbacks.OnInterrupted(e.PartialText, e.Behavior)
@@ -206,7 +213,62 @@ func (rs *RunStream) Process(callbacks StreamCallbacks) (string, error) {
 		}
 	}
 
-	if err := rs.Err(); err != nil {
+	if err := errFn(); err != nil {
+		if callbacks.OnError != nil {
+			callbacks.OnError(err)
+		}
+		return text.String(), err
+	}
+
+	return text.String(), nil
+}
+
+func processGatewayRunEvents(events <-chan types.RunStreamEvent, errFn func() error, callbacks StreamCallbacks) (string, error) {
+	var text strings.Builder
+	toolMetaByIndex := make(map[int]toolStreamMeta)
+
+	for event := range events {
+		switch e := event.(type) {
+		case types.RunStreamEventWrapper:
+			processCommonStreamEvent(e.Event, &text, callbacks, toolMetaByIndex)
+
+		case types.AudioChunkEvent:
+			if callbacks.OnAudioChunk != nil {
+				data, err := base64.StdEncoding.DecodeString(e.Audio)
+				if err != nil {
+					return text.String(), fmt.Errorf("decode audio chunk: %w", err)
+				}
+				callbacks.OnAudioChunk(data, e.Format)
+			}
+
+		case types.AudioUnavailableEvent:
+			if callbacks.OnAudioUnavailable != nil {
+				callbacks.OnAudioUnavailable(e.Reason, e.Message)
+			}
+
+		case types.RunStepStartEvent:
+			if callbacks.OnStepStart != nil {
+				callbacks.OnStepStart(e.Index)
+			}
+
+		case types.RunStepCompleteEvent:
+			if callbacks.OnStepComplete != nil {
+				callbacks.OnStepComplete(e.Index, &Response{MessageResponse: e.Response})
+			}
+
+		case types.RunToolCallStartEvent:
+			if callbacks.OnToolCallStart != nil {
+				callbacks.OnToolCallStart(e.ID, e.Name, e.Input)
+			}
+
+		case types.RunToolResultEvent:
+			if callbacks.OnToolResult != nil {
+				callbacks.OnToolResult(e.ID, e.Name, e.Content, typesErrorToCoreErrorPtr(e.Error))
+			}
+		}
+	}
+
+	if err := errFn(); err != nil {
 		if callbacks.OnError != nil {
 			callbacks.OnError(err)
 		}
@@ -218,6 +280,10 @@ func (rs *RunStream) Process(callbacks StreamCallbacks) (string, error) {
 
 // processStreamEvent handles the inner stream events (from the LLM).
 func (rs *RunStream) processStreamEvent(event types.StreamEvent, text *strings.Builder, callbacks StreamCallbacks, toolMetaByIndex map[int]toolStreamMeta) {
+	processCommonStreamEvent(event, text, callbacks, toolMetaByIndex)
+}
+
+func processCommonStreamEvent(event types.StreamEvent, text *strings.Builder, callbacks StreamCallbacks, toolMetaByIndex map[int]toolStreamMeta) {
 	switch e := event.(type) {
 	case types.ContentBlockStartEvent:
 		if tool, ok := e.ContentBlock.(types.ToolUseBlock); ok {
@@ -259,6 +325,13 @@ func (rs *RunStream) processStreamEvent(event types.StreamEvent, text *strings.B
 			callbacks.OnError(fmt.Errorf("%s: %s", e.Error.Type, e.Error.Message))
 		}
 	}
+}
+
+func typesErrorToCoreErrorPtr(err *types.Error) error {
+	if err == nil {
+		return nil
+	}
+	return typesErrorToCoreError(*err)
 }
 
 type toolStreamMeta struct {

@@ -7,11 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vango-go/vai-lite/pkg/core/types"
 	vai "github.com/vango-go/vai-lite/sdk"
 )
 
-func TestRefreshImageStoreFromHistory_DedupesPromotedImage(t *testing.T) {
+func TestRefreshImageStoreFromHistory_DedupesCanonicalToolResultImage(t *testing.T) {
 	t.Parallel()
 
 	image := vai.Image([]byte("hello"), "image/png")
@@ -23,10 +22,6 @@ func TestRefreshImageStoreFromHistory_DedupesPromotedImage(t *testing.T) {
 				Content: []vai.ContentBlock{
 					vai.ToolResult("call_1", []vai.ContentBlock{image}),
 				},
-			},
-			{
-				Role:    "assistant",
-				Content: []vai.ContentBlock{image},
 			},
 		},
 	}
@@ -105,57 +100,5 @@ func TestHandleDownloadCommand_UnknownImage(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), `download error: unknown image id "image_9"`) {
 		t.Fatalf("unexpected stderr: %q", errOut.String())
-	}
-}
-
-func TestCompactChatHistoryForModel_StripsImagePayloads(t *testing.T) {
-	t.Parallel()
-
-	history := []types.Message{
-		{
-			Role: "assistant",
-			Content: []types.ContentBlock{
-				types.ToolUseBlock{Type: "tool_use", ID: "call_1", Name: "vai_image", Input: map[string]any{"prompt": "make an image"}},
-			},
-		},
-		{
-			Role: "user",
-			Content: []types.ContentBlock{
-				types.ToolResultBlock{
-					Type:      "tool_result",
-					ToolUseID: "call_1",
-					Content: []types.ContentBlock{
-						types.TextBlock{Type: "text", Text: `{"tool":"vai_image","generated_image_ids":["img-01"]}`},
-						types.ImageBlock{Type: "image", Source: types.ImageSource{Type: "base64", MediaType: "image/png", Data: "aGVsbG8="}},
-					},
-				},
-			},
-		},
-		{
-			Role: "assistant",
-			Content: []types.ContentBlock{
-				types.TextBlock{Type: "text", Text: "created it"},
-				types.ImageBlock{Type: "image", Source: types.ImageSource{Type: "base64", MediaType: "image/png", Data: "aGVsbG8="}},
-			},
-		},
-	}
-
-	compacted := compactChatHistoryForModel(history)
-	toolResult, ok := compacted[1].ContentBlocks()[0].(types.ToolResultBlock)
-	if !ok {
-		t.Fatalf("tool result=%T", compacted[1].ContentBlocks()[0])
-	}
-	if len(toolResult.Content) != 2 {
-		t.Fatalf("len(toolResult.Content)=%d, want 2", len(toolResult.Content))
-	}
-	if !strings.Contains(toolResult.Content[1].(types.TextBlock).Text, "generated image delivered") {
-		t.Fatalf("unexpected compacted tool result: %#v", toolResult.Content)
-	}
-	lastBlocks := compacted[2].ContentBlocks()
-	if len(lastBlocks) != 2 {
-		t.Fatalf("len(lastBlocks)=%d", len(lastBlocks))
-	}
-	if tb, ok := lastBlocks[1].(types.TextBlock); !ok || !strings.Contains(tb.Text, "omitted from demo model context") {
-		t.Fatalf("assistant image not compacted: %#v", lastBlocks[1])
 	}
 }

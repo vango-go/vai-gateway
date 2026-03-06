@@ -231,58 +231,6 @@ func TestGatewayVAIImage_PostsExecuteRequestWithProviderHeader(t *testing.T) {
 	}
 }
 
-func TestGatewayVAIImage_PostsExecutionContextImages(t *testing.T) {
-	t.Parallel()
-
-	var gotBody types.ServerToolExecuteRequest
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
-		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
-			t.Fatalf("decode request body: %v", err)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(types.ServerToolExecuteResponse{
-			Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "ok"}},
-		})
-	}))
-	defer server.Close()
-
-	client := NewClient(
-		WithBaseURL(server.URL),
-		WithProviderKey("gem-dev", "gem-test"),
-		WithHTTPClient(server.Client()),
-	)
-
-	ctx := contextWithToolExecutionClient(context.Background(), client)
-	ctx = contextWithServerToolExecutionContext(ctx, &types.ServerToolExecutionContext{
-		Images: []types.ServerToolExecutionImage{{
-			ID: "img-01",
-			Image: types.ImageBlock{
-				Type: "image",
-				Source: types.ImageSource{
-					Type:      "base64",
-					MediaType: "image/png",
-					Data:      "Zm9v",
-				},
-			},
-		}},
-	})
-
-	_, err := VAIImage(GemDev).Handler(ctx, json.RawMessage(`{"prompt":"edit it","images":[{"id":"img-01"}]}`))
-	if err != nil {
-		t.Fatalf("handler error: %v", err)
-	}
-	if gotBody.ExecutionContext == nil {
-		t.Fatal("expected execution_context")
-	}
-	if len(gotBody.ExecutionContext.Images) != 1 {
-		t.Fatalf("len(execution_context.images)=%d", len(gotBody.ExecutionContext.Images))
-	}
-	if gotBody.ExecutionContext.Images[0].ID != "img-01" {
-		t.Fatalf("execution_context.images[0].id=%q", gotBody.ExecutionContext.Images[0].ID)
-	}
-}
-
 func TestGatewayVAIWebTools_RequireProxyMode(t *testing.T) {
 	t.Parallel()
 

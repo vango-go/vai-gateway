@@ -30,12 +30,13 @@ func TestPartitionLiveTools(t *testing.T) {
 	requestTools, handlers, serverTools := partitionLiveTools([]vai.ToolWithHandler{
 		vai.VAIWebSearch(vai.Tavily),
 		vai.VAIWebFetch(vai.Tavily),
+		vai.VAIImage(vai.GemDev),
 		talkTool,
 		localTool,
 	})
 
-	if len(serverTools) != 2 {
-		t.Fatalf("len(serverTools)=%d, want 2", len(serverTools))
+	if len(serverTools) != 3 {
+		t.Fatalf("len(serverTools)=%d, want 3", len(serverTools))
 	}
 	if len(requestTools) != 1 {
 		t.Fatalf("len(requestTools)=%d, want 1", len(requestTools))
@@ -62,6 +63,7 @@ func TestBuildLiveConnectRequest_ConfiguresRunRequest(t *testing.T) {
 		MaxTokens:    321,
 		SystemPrompt: "Be concise",
 		VoiceID:      "voice-id",
+		ProviderKeys: map[string]string{"gem-dev": "gem-test"},
 	}, "oai-resp/gpt-5-mini", nil, 16000, []vai.ToolWithHandler{vai.VAIWebSearch(vai.Tavily), localTool})
 
 	if req.Request.Model != "oai-resp/gpt-5-mini" {
@@ -92,7 +94,23 @@ func TestBuildLiveConnectRequest_ConfiguresRunRequest(t *testing.T) {
 		t.Fatalf("missing local_tool handler")
 	}
 	if !strings.Contains(req.Request.System.(string), talkToUserSystemInstruction) {
-		t.Fatalf("system prompt missing enforced instruction: %v", req.Request.System)
+		t.Fatalf("system prompt missing voice instruction: %v", req.Request.System)
+	}
+}
+
+func TestBuildLiveConnectRequest_ConfiguresImageServerTool(t *testing.T) {
+	req, _ := buildLiveConnectRequest(chatConfig{
+		MaxTokens:    321,
+		VoiceID:      "voice-id",
+		ProviderKeys: map[string]string{"gem-dev": "gem-test"},
+	}, "oai-resp/gpt-5-mini", nil, 16000, []vai.ToolWithHandler{vai.VAIImage(vai.GemDev)})
+
+	if len(req.ServerTools) != 1 || req.ServerTools[0] != "vai_image" {
+		t.Fatalf("server_tools=%v, want [vai_image]", req.ServerTools)
+	}
+	cfg, ok := req.ServerToolConfig["vai_image"].(map[string]any)
+	if !ok || cfg["provider"] != "gem-dev" {
+		t.Fatalf("server_tool_config=%#v", req.ServerToolConfig)
 	}
 }
 

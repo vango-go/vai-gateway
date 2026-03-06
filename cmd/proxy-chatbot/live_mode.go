@@ -202,7 +202,7 @@ func startLiveMode(ctx context.Context, cfg chatConfig, state *chatRuntime, tool
 
 func buildLiveConnectRequest(cfg chatConfig, model string, history []vai.Message, outputSampleRate int, chatTools []vai.ToolWithHandler) (*vai.LiveConnectRequest, *vai.LiveConnectOptions) {
 	requestTools, handlerMap, serverTools := partitionLiveTools(chatTools)
-	serverToolConfig := buildLiveServerToolConfig(serverTools)
+	serverToolConfig := buildLiveServerToolConfig(cfg, serverTools)
 
 	if outputSampleRate <= 0 {
 		outputSampleRate = liveClientDefaultOutputSampleRateHz
@@ -216,7 +216,7 @@ func buildLiveConnectRequest(cfg chatConfig, model string, history []vai.Message
 		Request: types.MessageRequest{
 			Model:      model,
 			Messages:   append([]types.Message(nil), history...),
-			System:     composeSystemPrompt(cfg.SystemPrompt, false),
+			System:     composeSystemPrompt(cfg.SystemPrompt, true),
 			MaxTokens:  cfg.MaxTokens,
 			Tools:      requestTools,
 			ToolChoice: types.ToolChoiceAuto(),
@@ -240,28 +240,32 @@ func buildLiveConnectRequest(cfg chatConfig, model string, history []vai.Message
 	return req, &vai.LiveConnectOptions{ToolHandlers: handlerMap}
 }
 
-func buildLiveServerToolConfig(serverTools []string) map[string]any {
+func buildLiveServerToolConfig(cfg chatConfig, serverTools []string) map[string]any {
 	if len(serverTools) == 0 {
 		return nil
 	}
-	cfg := make(map[string]any, len(serverTools))
+	serverToolConfig := make(map[string]any, len(serverTools))
 	for _, name := range serverTools {
 		switch strings.TrimSpace(name) {
 		case "vai_web_search", "vai_web_fetch":
-			cfg[name] = map[string]any{"provider": "tavily"}
+			serverToolConfig[name] = map[string]any{"provider": "tavily"}
+		case "vai_image":
+			if provider, ok := preferredImageToolProvider(cfg); ok {
+				serverToolConfig[name] = map[string]any{"provider": string(provider)}
+			}
 		}
 	}
-	if len(cfg) == 0 {
+	if len(serverToolConfig) == 0 {
 		return nil
 	}
-	return cfg
+	return serverToolConfig
 }
 
 func partitionLiveTools(chatTools []vai.ToolWithHandler) ([]types.Tool, map[string]vai.ToolHandler, []string) {
 	requestTools := make([]types.Tool, 0, len(chatTools))
 	handlers := make(map[string]vai.ToolHandler, len(chatTools))
-	serverTools := make([]string, 0, 2)
-	seenServerTools := make(map[string]struct{}, 2)
+	serverTools := make([]string, 0, 3)
+	seenServerTools := make(map[string]struct{}, 3)
 
 	for _, tool := range chatTools {
 		name := strings.TrimSpace(tool.Name)
@@ -270,7 +274,7 @@ func partitionLiveTools(chatTools []vai.ToolWithHandler) ([]types.Tool, map[stri
 		}
 
 		switch name {
-		case "vai_web_search", "vai_web_fetch":
+		case "vai_web_search", "vai_web_fetch", "vai_image":
 			if _, seen := seenServerTools[name]; !seen {
 				serverTools = append(serverTools, name)
 				seenServerTools[name] = struct{}{}

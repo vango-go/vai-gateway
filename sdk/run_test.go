@@ -170,7 +170,7 @@ func TestExecuteToolCall_InjectsClientIntoContext(t *testing.T) {
 		ID:    "call_1",
 		Name:  "ctx_tool",
 		Input: map[string]any{"x": 1},
-	}, nil, &cfg)
+	}, &cfg)
 
 	if result.Error != nil {
 		t.Fatalf("executeToolCall() error = %v", result.Error)
@@ -184,49 +184,6 @@ func TestExecuteToolCall_InjectsClientIntoContext(t *testing.T) {
 	}
 	if tb.Text != "ok" {
 		t.Fatalf("result text = %q, want %q", tb.Text, "ok")
-	}
-}
-
-func TestExecuteToolCall_InjectsServerToolExecutionContext(t *testing.T) {
-	svc := &MessagesService{
-		client: &Client{baseURL: "http://gateway.test"},
-	}
-
-	cfg := defaultRunConfig()
-	cfg.toolHandlers["ctx_tool"] = func(ctx context.Context, input json.RawMessage) (any, error) {
-		execCtx := serverToolExecutionContextFromContext(ctx)
-		if execCtx == nil {
-			t.Fatal("expected execution context in tool handler")
-		}
-		if len(execCtx.Images) != 1 {
-			t.Fatalf("len(execCtx.Images)=%d, want 1", len(execCtx.Images))
-		}
-		if execCtx.Images[0].ID != "img-01" {
-			t.Fatalf("execCtx.Images[0].ID=%q", execCtx.Images[0].ID)
-		}
-		return "ok", nil
-	}
-
-	history := []types.Message{{
-		Role: "assistant",
-		Content: []types.ContentBlock{
-			types.ImageBlock{Type: "image", Source: types.ImageSource{
-				Type:      "base64",
-				MediaType: "image/png",
-				Data:      "Zm9v",
-			}},
-		},
-	}}
-
-	result := svc.executeToolCall(context.Background(), types.ToolUseBlock{
-		Type:  "tool_use",
-		ID:    "call_1",
-		Name:  "ctx_tool",
-		Input: map[string]any{"x": 1},
-	}, buildServerToolExecutionContext(history), &cfg)
-
-	if result.Error != nil {
-		t.Fatalf("executeToolCall() error = %v", result.Error)
 	}
 }
 
@@ -273,7 +230,7 @@ func TestExecuteToolCall_MixesGatewayAndLocalTools(t *testing.T) {
 		ID:    "call_gw",
 		Name:  "vai_web_search",
 		Input: map[string]any{"query": "latest"},
-	}, nil, &cfg)
+	}, &cfg)
 	if gwResult.Error != nil {
 		t.Fatalf("gateway tool error: %v", gwResult.Error)
 	}
@@ -290,7 +247,7 @@ func TestExecuteToolCall_MixesGatewayAndLocalTools(t *testing.T) {
 		ID:    "call_local",
 		Name:  "local_echo",
 		Input: map[string]any{"text": "hi"},
-	}, nil, &cfg)
+	}, &cfg)
 	if localResult.Error != nil {
 		t.Fatalf("local tool error: %v", localResult.Error)
 	}

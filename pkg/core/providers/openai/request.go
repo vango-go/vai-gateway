@@ -180,6 +180,12 @@ func (p *Provider) translateMessages(messages []types.Message, system any) []cha
 					ToolCallID: tr.ToolUseID,
 					Content:    p.toolResultToText(tr.Content),
 				})
+				if p.toolResultNeedsMultimodalMessage(tr.Content) {
+					result = append(result, chatMessage{
+						Role:    "user",
+						Content: p.translateContentBlocks(tr.Content),
+					})
+				}
 			}
 		}
 		if hasToolResults {
@@ -359,6 +365,16 @@ func (p *Provider) toolResultToText(content []types.ContentBlock) string {
 		}
 	}
 	return result
+}
+
+func (p *Provider) toolResultNeedsMultimodalMessage(content []types.ContentBlock) bool {
+	for _, block := range content {
+		switch block.(type) {
+		case types.ImageBlock, types.AudioBlock, types.VideoBlock, types.DocumentBlock:
+			return true
+		}
+	}
+	return false
 }
 
 // getAudioFormat extracts the audio format from media type.

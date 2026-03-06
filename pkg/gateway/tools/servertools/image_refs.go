@@ -33,15 +33,9 @@ func BuildImageRefRegistry(messages []types.Message) *ImageRefRegistry {
 	return reg
 }
 
-func BuildImageRefRegistryFromExecutionContext(execCtx *types.ServerToolExecutionContext) *ImageRefRegistry {
-	reg := NewImageRefRegistry()
-	if execCtx == nil {
-		return reg
-	}
-	for i := range execCtx.Images {
-		reg.RegisterWithID(execCtx.Images[i].ID, execCtx.Images[i].Image)
-	}
-	return reg
+func BuildPlannerMessages(messages []types.Message, includeImages bool) ([]types.Message, *ImageRefRegistry) {
+	reg := BuildImageRefRegistry(messages)
+	return injectPlannerImageRefs(messages, reg, includeImages), reg
 }
 
 func ContextWithImageRefRegistry(ctx context.Context, reg *ImageRefRegistry) context.Context {
@@ -85,26 +79,6 @@ func (r *ImageRefRegistry) Register(block types.ImageBlock) string {
 	return id
 }
 
-func (r *ImageRefRegistry) RegisterWithID(id string, block types.ImageBlock) string {
-	if r == nil {
-		return ""
-	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return ""
-	}
-	fp := imageFingerprint(block)
-	r.byFingerprint[fp] = id
-	r.byID[id] = block
-	if strings.HasPrefix(id, "img-") {
-		var n int
-		if _, err := fmt.Sscanf(id, "img-%02d", &n); err == nil && n > r.count {
-			r.count = n
-		}
-	}
-	return id
-}
-
 func (r *ImageRefRegistry) IDFor(block types.ImageBlock) string {
 	if r == nil {
 		return ""
@@ -117,6 +91,10 @@ func (r *ImageRefRegistry) IDFor(block types.ImageBlock) string {
 }
 
 func InjectImageRefText(messages []types.Message, reg *ImageRefRegistry) []types.Message {
+	return injectPlannerImageRefs(messages, reg, true)
+}
+
+func injectPlannerImageRefs(messages []types.Message, reg *ImageRefRegistry, includeImages bool) []types.Message {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -130,7 +108,7 @@ func InjectImageRefText(messages []types.Message, reg *ImageRefRegistry) []types
 		}
 		out[i] = types.Message{
 			Role:    msg.Role,
-			Content: injectImageRefBlocks(blocks, reg),
+			Content: injectImageRefBlocks(blocks, reg, includeImages),
 		}
 	}
 	return out
@@ -155,29 +133,39 @@ func registerImageRefsInBlocks(reg *ImageRefRegistry, blocks []types.ContentBloc
 	}
 }
 
-func injectImageRefBlocks(blocks []types.ContentBlock, reg *ImageRefRegistry) []types.ContentBlock {
+func injectImageRefBlocks(blocks []types.ContentBlock, reg *ImageRefRegistry, includeImages bool) []types.ContentBlock {
 	out := make([]types.ContentBlock, 0, len(blocks)+2)
 	for i := range blocks {
 		switch b := blocks[i].(type) {
 		case types.ImageBlock:
 			id := reg.Register(b)
-			out = append(out, types.TextBlock{Type: "text", Text: id}, b)
+			out = append(out, types.TextBlock{Type: "text", Text: id})
+			if includeImages {
+				out = append(out, b)
+			} else {
+				out = append(out, types.TextBlock{Type: "text", Text: "[image omitted for non-vision model]"})
+			}
 		case *types.ImageBlock:
 			if b == nil {
 				continue
 			}
 			id := reg.Register(*b)
-			out = append(out, types.TextBlock{Type: "text", Text: id}, *b)
+			out = append(out, types.TextBlock{Type: "text", Text: id})
+			if includeImages {
+				out = append(out, *b)
+			} else {
+				out = append(out, types.TextBlock{Type: "text", Text: "[image omitted for non-vision model]"})
+			}
 		case types.ToolResultBlock:
 			cloned := b
-			cloned.Content = injectImageRefBlocks(cloned.Content, reg)
+			cloned.Content = injectImageRefBlocks(cloned.Content, reg, includeImages)
 			out = append(out, cloned)
 		case *types.ToolResultBlock:
 			if b == nil {
 				continue
 			}
 			cloned := *b
-			cloned.Content = injectImageRefBlocks(cloned.Content, reg)
+			cloned.Content = injectImageRefBlocks(cloned.Content, reg, includeImages)
 			out = append(out, cloned)
 		default:
 			out = append(out, blocks[i])
