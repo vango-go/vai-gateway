@@ -154,6 +154,30 @@ function formatUSD(cents) {
   }).format(amount);
 }
 
+function balanceStatus(state) {
+  const status = String(state?.props?.currentBalanceStatus || "").trim();
+  if (status === "ready" || status === "loading" || status === "unavailable") {
+    return status;
+  }
+  return Number.isFinite(Number(state?.props?.currentBalanceCents)) ? "ready" : "loading";
+}
+
+function balanceCents(state) {
+  const cents = Number(state?.props?.currentBalanceCents);
+  return Number.isFinite(cents) ? cents : 0;
+}
+
+function balanceLabel(state) {
+  switch (balanceStatus(state)) {
+    case "ready":
+      return formatUSD(balanceCents(state));
+    case "unavailable":
+      return "Unavailable";
+    default:
+      return "Checking...";
+  }
+}
+
 function normalizeMessage(msg) {
   return {
     id: String(msg?.id || `local_${Math.random().toString(36).slice(2)}`),
@@ -166,6 +190,16 @@ function normalizeMessage(msg) {
     pending: !!msg?.pending,
     error: !!msg?.error,
   };
+}
+
+function hasConversationPayload(props) {
+  return (
+    !!props &&
+    typeof props === "object" &&
+    String(props.conversationId || "").trim() !== "" &&
+    Array.isArray(props.messages) &&
+    Array.isArray(props.modelOptions)
+  );
 }
 
 function byokStorageKey(provider) {
@@ -729,6 +763,7 @@ export function mount(el, props, api) {
 
   function renderComposerMeta() {
     const source = effectiveKeySource(state);
+    const hostedBalanceStatus = balanceStatus(state);
     const chips = [];
     chips.push(`<span class="meta-chip">${escapeHTML(keySourceLabel(source))}</span>`);
     chips.push(`<span class="meta-chip">Model ${escapeHTML(state.currentModel)}</span>`);
@@ -740,7 +775,13 @@ export function mount(el, props, api) {
     if (source === "platform_hosted" && !hostedModelAvailable(state)) {
       chips.push(`<span class="meta-chip meta-chip-danger">Selected model is not available in VAI-hosted mode</span>`);
     }
-    if (source === "platform_hosted" && Number(state.props.currentBalanceCents || 0) <= 0) {
+    if (source === "platform_hosted" && hostedBalanceStatus === "loading") {
+      chips.push(`<span class="meta-chip meta-chip-warning">Checking VAI credits</span>`);
+    }
+    if (source === "platform_hosted" && hostedBalanceStatus === "unavailable") {
+      chips.push(`<span class="meta-chip meta-chip-warning">VAI credit balance unavailable</span>`);
+    }
+    if (source === "platform_hosted" && hostedBalanceStatus === "ready" && balanceCents(state) <= 0) {
       chips.push(`<span class="meta-chip meta-chip-danger">VAI credits depleted</span>`);
     }
     if (source === "customer_byok_vault" && !canUseWorkspaceBYOK(state)) {
@@ -770,7 +811,7 @@ export function mount(el, props, api) {
   }
 
   function renderStaticBits() {
-    refs.balance.textContent = formatUSD(state.props.currentBalanceCents || 0);
+    refs.balance.textContent = balanceLabel(state);
     renderModelOptions();
     renderKeySourceControls();
     renderBYOKPanel();
@@ -946,6 +987,7 @@ export function mount(el, props, api) {
     }
 
     const source = effectiveKeySource(state);
+    const hostedBalanceStatus = balanceStatus(state);
     if (source === "customer_byok_browser" && !hasAnyBYOK(state)) {
       setStatus("Add at least one browser-local provider key before sending with BYOK.", "error");
       return;
@@ -958,7 +1000,7 @@ export function mount(el, props, api) {
       setStatus("The selected model is not available in VAI-hosted mode. Switch modes or choose a hosted model.", "error");
       return;
     }
-    if (source === "platform_hosted" && Number(state.props.currentBalanceCents || 0) <= 0) {
+    if (source === "platform_hosted" && hostedBalanceStatus === "ready" && balanceCents(state) <= 0) {
       setStatus("VAI credits are depleted. Add credits or switch to workspace/browser BYOK.", "error");
       return;
     }
@@ -1187,14 +1229,33 @@ export function mount(el, props, api) {
 
   return {
     update(nextProps) {
-      const previousConversationId = state.props?.conversationId;
+      const previousConversationId = String(state.props?.conversationId || "");
+      const nextConversationId = String(nextProps?.conversationId || "");
+      const nextHasPayload = hasConversationPayload(nextProps);
+
+      if (!nextHasPayload && previousConversationId) {
+        setStatus("Conversation state is syncing. Keeping the last ready view.", "neutral");
+        return;
+      }
+
       state.props = nextProps || {};
-      state.currentModel = String(nextProps?.model || state.currentModel);
+      const conversationChanged = nextConversationId !== previousConversationId;
+      if (conversationChanged) {
+        state.keySource = preferredKeySource(state.props || {});
+        state.pendingAttachments = [];
+        state.draft = "";
+        state.editMessageId = "";
+        state.busy = false;
+        state.activeRunRequestId = "";
+        state.activeAssistantMessage = null;
+        refs.textarea.value = "";
+      }
+      state.currentModel = String(state.props?.model || state.currentModel);
       if (
-        Array.isArray(nextProps?.messages) &&
-        (!state.activeRunRequestId || String(nextProps?.conversationId || "") !== String(previousConversationId || ""))
+        Array.isArray(state.props?.messages) &&
+        (!state.activeRunRequestId || conversationChanged)
       ) {
-        state.messages = nextProps.messages.map(normalizeMessage);
+        state.messages = state.props.messages.map(normalizeMessage);
       }
       refs.settingsKeys.href = String(state.props.settingsKeysURL || "/settings/keys");
       refs.settingsBilling.href = String(state.props.settingsBillingURL || "/settings/billing");

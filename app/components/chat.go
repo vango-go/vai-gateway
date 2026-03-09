@@ -23,13 +23,38 @@ type ChatPageProps struct {
 }
 
 type chatPageData struct {
-	Org                 *services.Organization
-	Conversations       []services.Conversation
-	Detail              *services.ConversationDetail
-	ProviderSecrets     []services.ProviderSecretRecord
-	CurrentBalanceCents int64
-	Messages            []map[string]any
+	Org             *services.Organization
+	Conversations   []services.Conversation
+	Detail          *services.ConversationDetail
+	ProviderSecrets []services.ProviderSecretRecord
+	CurrentBalance  chatBalanceState
+	Messages        []map[string]any
 }
+
+type chatStaticData struct {
+	Org             *services.Organization
+	ProviderSecrets []services.ProviderSecretRecord
+}
+
+type chatConversationData struct {
+	Detail   *services.ConversationDetail
+	Messages []map[string]any
+}
+
+type chatSubmitResult struct {
+	KeySource services.KeySource
+}
+
+type chatBalanceState struct {
+	Status              string
+	CurrentBalanceCents int64
+}
+
+const (
+	chatBalanceStatusLoading     = "loading"
+	chatBalanceStatusReady       = "ready"
+	chatBalanceStatusUnavailable = "unavailable"
+)
 
 func ChatPage(p ChatPageProps) vango.Component {
 	return vango.Setup(p, func(s vango.SetupCtx[ChatPageProps]) vango.RenderFn {
@@ -37,47 +62,83 @@ func ChatPage(p ChatPageProps) vango.Component {
 		props := s.Props()
 		pendingConversationID := setup.Signal(&s, "")
 
-		pageData := setup.ResourceKeyed(&s,
-			func() string {
-				current := props.Get()
-				return current.Actor.OrgID + "|" + current.ConversationID
-			},
-			func(ctx context.Context, _ string) (*chatPageData, error) {
+		staticData := setup.ResourceKeyed(&s,
+			func() string { return props.Get().Actor.OrgID },
+			func(ctx context.Context, orgID string) (*chatStaticData, error) {
 				current := props.Peek()
 				org, err := ResolveOrganization(ctx, current.Actor)
 				if err != nil {
 					return nil, fmt.Errorf("load org: %w", err)
 				}
-				conversations, err := appruntime.Get().Services.ListConversations(ctx, current.Actor.OrgID)
-				if err != nil {
-					return nil, fmt.Errorf("load conversations: %w", err)
-				}
-				detail, err := appruntime.Get().Services.Conversation(ctx, current.Actor.OrgID, current.ConversationID)
-				if err != nil {
-					return nil, fmt.Errorf("load conversation: %w", err)
-				}
-				providerSecrets, err := appruntime.Get().Services.ListProviderSecrets(ctx, current.Actor.OrgID)
+				providerSecrets, err := appruntime.Get().Services.ListProviderSecrets(ctx, orgID)
 				if err != nil {
 					return nil, fmt.Errorf("load provider secrets: %w", err)
 				}
-				balance, err := appruntime.Get().Services.CurrentBalance(ctx, current.Actor.OrgID)
+				return &chatStaticData{
+					Org:             org,
+					ProviderSecrets: providerSecrets,
+				}, nil
+			},
+		)
+
+		conversations := setup.ResourceKeyed(&s,
+			func() string { return props.Get().Actor.OrgID },
+			func(ctx context.Context, orgID string) ([]services.Conversation, error) {
+				items, err := appruntime.Get().Services.ListConversations(ctx, orgID)
 				if err != nil {
-					balance = 0
+					return nil, fmt.Errorf("load conversations: %w", err)
+				}
+				return items, nil
+			},
+		)
+		lastConversations := setup.Signal(&s, []services.Conversation(nil))
+		conversations.OnSuccess(func(items []services.Conversation) {
+			lastConversations.Set(append([]services.Conversation{}, items...))
+		})
+
+		conversationData := setup.ResourceKeyed(&s,
+			func() string {
+				current := props.Get()
+				return current.Actor.OrgID + "|" + current.ConversationID
+			},
+			func(ctx context.Context, _ string) (*chatConversationData, error) {
+				current := props.Peek()
+				detail, err := appruntime.Get().Services.Conversation(ctx, current.Actor.OrgID, current.ConversationID)
+				if err != nil {
+					return nil, fmt.Errorf("load conversation: %w", err)
 				}
 				messageViews, err := chatMessagesView(ctx, detail)
 				if err != nil {
 					return nil, fmt.Errorf("prepare messages: %w", err)
 				}
-				return &chatPageData{
-					Org:                 org,
-					Conversations:       conversations,
-					Detail:              detail,
-					ProviderSecrets:     providerSecrets,
-					CurrentBalanceCents: balance,
-					Messages:            messageViews,
+				return &chatConversationData{
+					Detail:   detail,
+					Messages: messageViews,
 				}, nil
 			},
 		)
+		lastConversationData := setup.Signal(&s, (*chatConversationData)(nil))
+		conversationData.OnSuccess(func(data *chatConversationData) {
+			lastConversationData.Set(data)
+		})
+
+		balanceData := setup.ResourceKeyed(&s,
+			func() string { return props.Get().Actor.OrgID },
+			func(ctx context.Context, orgID string) (chatBalanceState, error) {
+				balanceState := chatBalanceState{Status: chatBalanceStatusReady}
+				balance, err := appruntime.Get().Services.CurrentBalance(ctx, orgID)
+				if err != nil {
+					balanceState.Status = chatBalanceStatusUnavailable
+					return balanceState, nil
+				}
+				balanceState.CurrentBalanceCents = balance
+				return balanceState, nil
+			},
+		)
+		lastBalanceData := setup.Signal(&s, chatBalanceState{Status: chatBalanceStatusLoading})
+		balanceData.OnSuccess(func(state chatBalanceState) {
+			lastBalanceData.Set(state)
+		})
 
 		newConversation := setup.Action(&s,
 			func(ctx context.Context, _ struct{}) (*services.Conversation, error) {
@@ -198,7 +259,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 		)
 
 		submitChat := setup.Action(&s,
-			func(ctx context.Context, in chatSubmitCommand) (struct{}, error) {
+			func(ctx context.Context, in chatSubmitCommand) (chatSubmitResult, error) {
 				actor := props.Peek().Actor
 				if in.RequestID == "" {
 					err := errors.New("chat request id is required")
@@ -207,7 +268,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 						RequestID: in.RequestID,
 						Error:     err.Error(),
 					})
-					return struct{}{}, err
+					return chatSubmitResult{}, err
 				}
 
 				org, err := appruntime.Get().Services.Org(ctx, actor.OrgID)
@@ -217,7 +278,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 						RequestID: in.RequestID,
 						Error:     err.Error(),
 					})
-					return struct{}{}, err
+					return chatSubmitResult{}, err
 				}
 
 				model := strings.TrimSpace(in.Model)
@@ -238,7 +299,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 						RequestID: in.RequestID,
 						Error:     err.Error(),
 					})
-					return struct{}{}, err
+					return chatSubmitResult{}, err
 				}
 				if keySource == services.KeySourcePlatformHosted {
 					if err := appruntime.Get().Services.ReservePlatformHostedUsage(ctx, actor.OrgID, model); err != nil {
@@ -247,7 +308,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 							RequestID: in.RequestID,
 							Error:     err.Error(),
 						})
-						return struct{}{}, err
+						return chatSubmitResult{}, err
 					}
 				}
 
@@ -257,7 +318,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 						RequestID: in.RequestID,
 						Error:     err.Error(),
 					})
-					return struct{}{}, err
+					return chatSubmitResult{}, err
 				}
 
 				switch {
@@ -268,7 +329,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 							RequestID: in.RequestID,
 							Error:     err.Error(),
 						})
-						return struct{}{}, err
+						return chatSubmitResult{}, err
 					}
 				case in.Regenerate:
 					detail, err := appruntime.Get().Services.Conversation(ctx, actor.OrgID, props.Peek().ConversationID)
@@ -278,7 +339,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 							RequestID: in.RequestID,
 							Error:     err.Error(),
 						})
-						return struct{}{}, err
+						return chatSubmitResult{}, err
 					}
 					lastUserID := chatruntime.LastUserMessageID(detail.Messages)
 					if lastUserID == "" {
@@ -288,7 +349,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 							RequestID: in.RequestID,
 							Error:     err.Error(),
 						})
-						return struct{}{}, err
+						return chatSubmitResult{}, err
 					}
 					if err := appruntime.Get().Services.TruncateConversationAfter(ctx, actor, props.Peek().ConversationID, lastUserID); err != nil {
 						dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
@@ -296,7 +357,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 							RequestID: in.RequestID,
 							Error:     err.Error(),
 						})
-						return struct{}{}, err
+						return chatSubmitResult{}, err
 					}
 				default:
 					if _, err := appruntime.Get().Services.AddUserMessage(ctx, actor, props.Peek().ConversationID, in.Message, keySource, in.AttachmentIDs); err != nil {
@@ -305,7 +366,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 							RequestID: in.RequestID,
 							Error:     err.Error(),
 						})
-						return struct{}{}, err
+						return chatSubmitResult{}, err
 					}
 				}
 
@@ -316,7 +377,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 						RequestID: in.RequestID,
 						Error:     err.Error(),
 					})
-					return struct{}{}, err
+					return chatSubmitResult{}, err
 				}
 				runReq, err := chatruntime.BuildConversationRunRequest(ctx, appruntime.Get().Services.BlobStore, detail, resolvedHeaders)
 				if err != nil {
@@ -325,7 +386,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 						RequestID: in.RequestID,
 						Error:     err.Error(),
 					})
-					return struct{}{}, err
+					return chatSubmitResult{}, err
 				}
 				runReq.Request.Model = model
 
@@ -347,7 +408,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 							Type:      "chat_stopped",
 							RequestID: in.RequestID,
 						})
-						return struct{}{}, err
+						return chatSubmitResult{}, err
 					}
 					message := strings.TrimSpace(err.Error())
 					var gatewayErr *chatruntime.GatewayError
@@ -359,7 +420,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 						RequestID: in.RequestID,
 						Error:     message,
 					})
-					return struct{}{}, err
+					return chatSubmitResult{}, err
 				}
 				if streamResult == nil || streamResult.Result == nil || streamResult.Result.Response == nil {
 					message := "conversation completed without a response"
@@ -375,7 +436,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 						RequestID: in.RequestID,
 						Error:     message,
 					})
-					return struct{}{}, err
+					return chatSubmitResult{}, err
 				}
 
 				if _, err := appruntime.Get().Services.AddAssistantMessage(
@@ -392,7 +453,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 						RequestID: in.RequestID,
 						Error:     err.Error(),
 					})
-					return struct{}{}, err
+					return chatSubmitResult{}, err
 				}
 				if err := appruntime.Get().Services.RecordUsage(
 					ctx,
@@ -414,11 +475,15 @@ func ChatPage(p ChatPageProps) vango.Component {
 					RequestID: in.RequestID,
 					Assistant: buildChatAssistantPayload(streamResult.Result, keySource),
 				})
-				return struct{}{}, nil
+				return chatSubmitResult{KeySource: keySource}, nil
 			},
 			vango.DropWhileRunning(),
-			vango.ActionOnSuccess(func(any) {
-				pageData.Refetch()
+			vango.ActionOnSuccess(func(result any) {
+				conversationData.Refetch()
+				conversations.Refetch()
+				if submitResult, ok := result.(chatSubmitResult); ok && submitResult.KeySource == services.KeySourcePlatformHosted {
+					balanceData.Refetch()
+				}
 			}),
 		)
 
@@ -500,60 +565,167 @@ func ChatPage(p ChatPageProps) vango.Component {
 		return func() *vango.VNode {
 			actor := props.Get().Actor
 			ctx := vango.UseCtx()
-			return pageData.Match(
-				vango.OnLoadingOrPending[*chatPageData](func() *vango.VNode {
-					return AppShell(ctx, actor, LoadingPanel("Loading chat..."))
-				}),
-				vango.OnError[*chatPageData](func(err error) *vango.VNode {
-					return AppShell(ctx, actor, PageErrorPanel(err))
-				}),
-				vango.OnReady(func(data *chatPageData) *vango.VNode {
-					islandProps := map[string]any{
-						"conversationId":        data.Detail.Conversation.ID,
-						"model":                 data.Detail.Conversation.Model,
-						"messages":              data.Messages,
-						"modelOptions":          modelOptions(data.Detail.Conversation.Model),
-						"allowBrowserBYOK":      data.Org.AllowBYOKOverride,
-						"platformHostedEnabled": data.Org.HostedUsageEnabled,
-						"hasWorkspaceProviders": len(data.ProviderSecrets) > 0,
-						"initialKeySource":      string(data.Detail.Conversation.KeySource),
-						"conversationTitle":     data.Detail.Conversation.Title,
-						"providerHints":         providerHints(),
-						"settingsKeysURL":       "/settings/keys",
-						"settingsBillingURL":    "/settings/billing",
-						"settingsAccessURL":     "/settings/access",
-						"currentBalanceCents":   data.CurrentBalanceCents,
-						"hostedModels":          hostedModelOptions(data.Detail.Conversation.Model),
-					}
+			staticSnapshot, loading, err := chatResolveStaticData(staticData.State(), staticData.Data(), staticData.Error())
+			if err != nil {
+				return AppShell(ctx, actor, PageErrorPanel(err))
+			}
+			if loading {
+				return AppShell(ctx, actor, LoadingPanel("Loading chat..."))
+			}
 
-					return AppShell(ctx, actor,
-						Div(
-							Class("chat-page"),
-							Sidebar(actor, data.Conversations, data.Detail.Conversation.ID, newConversation.IsRunning(), func() {
-								newConversation.Run(struct{}{})
-							}),
-							Main(
-								Class("chat-main"),
-								Header(
-									Class("chat-header"),
-									Div(
-										H1(Text(data.Detail.Conversation.Title)),
-										P(Textf("Model: %s", data.Detail.Conversation.Model)),
-									),
-									Div(
-										Class("chat-header-actions"),
-										A(Href("/settings/keys"), Class("btn btn-secondary"), Text("Keys")),
-										A(Href("/settings/billing"), Class("btn btn-secondary"), Text("Billing")),
-									),
-								),
-								chatIslandBoundary(islandProps, handleIslandMessage),
+			conversationSnapshot, loading, err := chatResolveConversationData(
+				props.Get().ConversationID,
+				conversationData.State(),
+				conversationData.Data(),
+				conversationData.Error(),
+				lastConversationData.Get(),
+			)
+			if err != nil {
+				return AppShell(ctx, actor, PageErrorPanel(err))
+			}
+			if loading {
+				return AppShell(ctx, actor, LoadingPanel("Loading chat..."))
+			}
+
+			conversationList, loading, err := chatResolveConversationsData(
+				conversations.State(),
+				conversations.Data(),
+				conversations.Error(),
+				lastConversations.Get(),
+			)
+			if err != nil {
+				return AppShell(ctx, actor, PageErrorPanel(err))
+			}
+			if loading {
+				return AppShell(ctx, actor, LoadingPanel("Loading chat..."))
+			}
+
+			data := chatBuildPageData(
+				staticSnapshot,
+				conversationList,
+				conversationSnapshot,
+				chatResolveBalanceData(balanceData.State(), balanceData.Data(), lastBalanceData.Get()),
+			)
+			return AppShell(ctx, actor,
+				Div(
+					Class("chat-page"),
+					Sidebar(actor, data.Conversations, data.Detail.Conversation.ID, newConversation.IsRunning(), func() {
+						newConversation.Run(struct{}{})
+					}),
+					Main(
+						Class("chat-main"),
+						Header(
+							Class("chat-header"),
+							Div(
+								H1(Text(data.Detail.Conversation.Title)),
+								P(Textf("Model: %s", data.Detail.Conversation.Model)),
+							),
+							Div(
+								Class("chat-header-actions"),
+								A(Href("/settings/keys"), Class("btn btn-secondary"), Text("Keys")),
+								A(Href("/settings/billing"), Class("btn btn-secondary"), Text("Billing")),
 							),
 						),
-					)
-				}),
+						chatIslandBoundary(chatIslandProps(data, data.CurrentBalance), handleIslandMessage),
+					),
+				),
 			)
 		}
 	})
+}
+
+func chatResolveStaticData(state vango.ResourceState, current *chatStaticData, currentErr error) (*chatStaticData, bool, error) {
+	switch state {
+	case vango.Ready:
+		return current, false, nil
+	case vango.Error:
+		return nil, false, currentErr
+	default:
+		return nil, true, nil
+	}
+}
+
+func chatResolveConversationsData(state vango.ResourceState, current []services.Conversation, currentErr error, last []services.Conversation) ([]services.Conversation, bool, error) {
+	switch state {
+	case vango.Ready:
+		return current, false, nil
+	case vango.Error:
+		if last != nil {
+			return last, false, nil
+		}
+		return nil, false, currentErr
+	default:
+		if last != nil {
+			return last, false, nil
+		}
+		return nil, true, nil
+	}
+}
+
+func chatResolveConversationData(conversationID string, state vango.ResourceState, current *chatConversationData, currentErr error, last *chatConversationData) (*chatConversationData, bool, error) {
+	switch state {
+	case vango.Ready:
+		return current, false, nil
+	case vango.Error:
+		if chatConversationSnapshotMatches(last, conversationID) {
+			return last, false, nil
+		}
+		return nil, false, currentErr
+	default:
+		if chatConversationSnapshotMatches(last, conversationID) {
+			return last, false, nil
+		}
+		return nil, true, nil
+	}
+}
+
+func chatResolveBalanceData(state vango.ResourceState, current, last chatBalanceState) chatBalanceState {
+	if state == vango.Ready {
+		return current
+	}
+	if last.Status == chatBalanceStatusReady || last.Status == chatBalanceStatusUnavailable {
+		return last
+	}
+	return chatBalanceState{Status: chatBalanceStatusLoading}
+}
+
+func chatConversationSnapshotMatches(data *chatConversationData, conversationID string) bool {
+	return data != nil && data.Detail != nil && data.Detail.Conversation.ID == conversationID
+}
+
+func chatBuildPageData(staticData *chatStaticData, conversations []services.Conversation, conversationData *chatConversationData, balance chatBalanceState) *chatPageData {
+	return &chatPageData{
+		Org:             staticData.Org,
+		Conversations:   conversations,
+		Detail:          conversationData.Detail,
+		ProviderSecrets: staticData.ProviderSecrets,
+		CurrentBalance:  balance,
+		Messages:        conversationData.Messages,
+	}
+}
+
+func chatIslandProps(data *chatPageData, balance chatBalanceState) map[string]any {
+	props := map[string]any{
+		"conversationId":        data.Detail.Conversation.ID,
+		"model":                 data.Detail.Conversation.Model,
+		"messages":              data.Messages,
+		"modelOptions":          modelOptions(data.Detail.Conversation.Model),
+		"allowBrowserBYOK":      data.Org.AllowBYOKOverride,
+		"platformHostedEnabled": data.Org.HostedUsageEnabled,
+		"hasWorkspaceProviders": len(data.ProviderSecrets) > 0,
+		"initialKeySource":      string(data.Detail.Conversation.KeySource),
+		"conversationTitle":     data.Detail.Conversation.Title,
+		"providerHints":         providerHints(),
+		"settingsKeysURL":       "/settings/keys",
+		"settingsBillingURL":    "/settings/billing",
+		"settingsAccessURL":     "/settings/access",
+		"currentBalanceStatus":  balance.Status,
+		"hostedModels":          hostedModelOptions(data.Detail.Conversation.Model),
+	}
+	if balance.Status == chatBalanceStatusReady {
+		props["currentBalanceCents"] = balance.CurrentBalanceCents
+	}
+	return props
 }
 
 func chatMessagesView(ctx context.Context, detail *services.ConversationDetail) ([]map[string]any, error) {

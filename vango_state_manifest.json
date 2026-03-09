@@ -5,7 +5,7 @@
   "buildSchema": "bs:v1:e3b0c44298fc",
   "primitives": {
     "github.com/vango-go/vai-lite/app/components.BillingPage#setup0.local.action@0": {
-      "stableID": "6da70323",
+      "stableID": "f013d954",
       "class": "local",
       "kind": "action",
       "codecFingerprint": "fp:v1:2565b845c2c6ac88ac4cf91f374fd3a6a04ce4b1fde15031e1897dd5aace41f8",
@@ -18,7 +18,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.BillingPage#setup0.local.effect@0": {
-      "stableID": "7ab98b23",
+      "stableID": "9494a971",
       "class": "local",
       "kind": "effect",
       "codecFingerprint": "fp:v1:bb2c9bbd8e42d1c77679ba12b77cdd888a502ceddd40605a33803cabc6da2578",
@@ -31,7 +31,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.BillingPage#setup0.local.resource@0": {
-      "stableID": "9417ca9a",
+      "stableID": "5df6dd8b",
       "class": "local",
       "kind": "resource",
       "codecFingerprint": "fp:v1:6575c8fe286aafa7db86c6d9b70bea5dfd0c243a5d621a564a62258a476da0e4",
@@ -44,7 +44,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.BillingPage#setup0.local.signal@0": {
-      "stableID": "224c1166",
+      "stableID": "32d62287",
       "class": "local",
       "kind": "signal",
       "codecFingerprint": "fp:v1:30a63eee6dca6c358b70d73211e051d443c38b6afee573489505c9b7d3b8dcbf",
@@ -57,7 +57,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.BillingPage#setup0.local.signal@1": {
-      "stableID": "507df776",
+      "stableID": "0f90cc67",
       "class": "local",
       "kind": "signal",
       "codecFingerprint": "fp:v1:30a63eee6dca6c358b70d73211e051d443c38b6afee573489505c9b7d3b8dcbf",
@@ -70,7 +70,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.BillingPage#setup0.local.signal@2": {
-      "stableID": "e55a4873",
+      "stableID": "d7495fd1",
       "class": "local",
       "kind": "signal",
       "codecFingerprint": "fp:v1:30a63eee6dca6c358b70d73211e051d443c38b6afee573489505c9b7d3b8dcbf",
@@ -83,7 +83,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.action@0": {
-      "stableID": "a31daec5",
+      "stableID": "b5348bfe",
       "class": "local",
       "kind": "action",
       "codecFingerprint": "fp:v1:477df8582f751b98ee7d050d85782011d752fde32159170b23d074e686b1874a",
@@ -91,12 +91,12 @@
       "debugName": "newConversation",
       "source": {
         "file": "app/components/chat.go",
-        "line": 82,
+        "line": 143,
         "col": 22
       }
     },
     "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.action@1": {
-      "stableID": "19431aaa",
+      "stableID": "49815c82",
       "class": "local",
       "kind": "action",
       "codecFingerprint": "fp:v1:ce36c795ecaa53729a4c760d973743e9f855ee644eedaf4bf8e3e1b8031fe34f",
@@ -104,12 +104,12 @@
       "debugName": "uploadIntent",
       "source": {
         "file": "app/components/chat.go",
-        "line": 149,
+        "line": 210,
         "col": 19
       }
     },
     "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.action@2": {
-      "stableID": "a7e506c4",
+      "stableID": "fb86bcd2",
       "class": "local",
       "kind": "action",
       "codecFingerprint": "fp:v1:bc79e8ae2ac915df35d445706fc63d55635e3c514d9601a74a198e02246b7870",
@@ -117,25 +117,25 @@
       "debugName": "uploadClaim",
       "source": {
         "file": "app/components/chat.go",
-        "line": 170,
+        "line": 231,
         "col": 18
       }
     },
     "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.action@3": {
-      "stableID": "467a74b7",
+      "stableID": "78f3c11e",
       "class": "local",
       "kind": "action",
-      "codecFingerprint": "fp:v1:54a3e5df375662583ba993fda731039ca14479801cf7fdff4776f03c991bebd7",
+      "codecFingerprint": "fp:v1:3e2b9d6e3dea568a9070815fa13e6e8c538cba20bef495109a15359acd233fde",
       "persisted": false,
       "debugName": "submitChat",
       "source": {
         "file": "app/components/chat.go",
-        "line": 200,
+        "line": 261,
         "col": 17
       }
     },
     "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.effect@0": {
-      "stableID": "575813fd",
+      "stableID": "53945f08",
       "class": "local",
       "kind": "effect",
       "codecFingerprint": "fp:v1:bb2c9bbd8e42d1c77679ba12b77cdd888a502ceddd40605a33803cabc6da2578",
@@ -143,25 +143,64 @@
       "debugName": "newConversation",
       "source": {
         "file": "app/components/chat.go",
-        "line": 102,
+        "line": 163,
         "col": 3
       }
     },
     "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.resource@0": {
-      "stableID": "fc915d8d",
+      "stableID": "dd3ab6e7",
       "class": "local",
       "kind": "resource",
-      "codecFingerprint": "fp:v1:3fcdc89206ef1f5d6c85553162d096728f2455fd3250fb2a3d8749e1c1cb21ff",
+      "codecFingerprint": "fp:v1:d6e7d08fee0d63f2bbedabec3a9f96ea6d6b20a01d445f1977e8fc36aeced7c4",
       "persisted": false,
-      "debugName": "pageData",
+      "debugName": "staticData",
       "source": {
         "file": "app/components/chat.go",
-        "line": 40,
-        "col": 15
+        "line": 65,
+        "col": 17
+      }
+    },
+    "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.resource@1": {
+      "stableID": "c12361d7",
+      "class": "local",
+      "kind": "resource",
+      "codecFingerprint": "fp:v1:79d819bf69474082f843f088decf9582346231372055e29e617a3180aac6cf15",
+      "persisted": false,
+      "debugName": "conversations",
+      "source": {
+        "file": "app/components/chat.go",
+        "line": 84,
+        "col": 20
+      }
+    },
+    "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.resource@2": {
+      "stableID": "5317c88b",
+      "class": "local",
+      "kind": "resource",
+      "codecFingerprint": "fp:v1:9d4be4b2d26fc2a3c10ef078b7d00e44ef56053e0c00fc67e263a3c80e988fea",
+      "persisted": false,
+      "debugName": "conversationData",
+      "source": {
+        "file": "app/components/chat.go",
+        "line": 99,
+        "col": 23
+      }
+    },
+    "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.resource@3": {
+      "stableID": "e384c003",
+      "class": "local",
+      "kind": "resource",
+      "codecFingerprint": "fp:v1:ce2dd651c32294193d4f6d7eb19cc1ca30049cfbfe818ef0c189d9fbd1fd1f22",
+      "persisted": false,
+      "debugName": "balanceData",
+      "source": {
+        "file": "app/components/chat.go",
+        "line": 125,
+        "col": 18
       }
     },
     "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.signal@0": {
-      "stableID": "915b3ee0",
+      "stableID": "5558b7b8",
       "class": "local",
       "kind": "signal",
       "codecFingerprint": "fp:v1:30a63eee6dca6c358b70d73211e051d443c38b6afee573489505c9b7d3b8dcbf",
@@ -169,12 +208,51 @@
       "debugName": "pendingConversationID",
       "source": {
         "file": "app/components/chat.go",
-        "line": 38,
+        "line": 63,
         "col": 28
       }
     },
+    "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.signal@1": {
+      "stableID": "55931fe3",
+      "class": "local",
+      "kind": "signal",
+      "codecFingerprint": "fp:v1:3b3ba2889af04acc8df856308b5ea75b1bc532619c53840a9809bbc0fa75677b",
+      "persisted": false,
+      "debugName": "lastConversations",
+      "source": {
+        "file": "app/components/chat.go",
+        "line": 94,
+        "col": 24
+      }
+    },
+    "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.signal@2": {
+      "stableID": "d13c1aa4",
+      "class": "local",
+      "kind": "signal",
+      "codecFingerprint": "fp:v1:f363dc3e1f1818641f6525ae9c09076e1e34058b02896222e70414a5340c7853",
+      "persisted": false,
+      "debugName": "lastConversationData",
+      "source": {
+        "file": "app/components/chat.go",
+        "line": 120,
+        "col": 27
+      }
+    },
+    "github.com/vango-go/vai-lite/app/components.ChatPage#setup0.local.signal@3": {
+      "stableID": "c5224b24",
+      "class": "local",
+      "kind": "signal",
+      "codecFingerprint": "fp:v1:f5f1f91e75f9575e545ec0d7370eab36976faf437f3a220d8522f98b258aeb9e",
+      "persisted": false,
+      "debugName": "lastBalanceData",
+      "source": {
+        "file": "app/components/chat.go",
+        "line": 138,
+        "col": 22
+      }
+    },
     "github.com/vango-go/vai-lite/app/components.DevelopersPage#setup0.local.action@0": {
-      "stableID": "cdf3aaeb",
+      "stableID": "bf503cb5",
       "class": "local",
       "kind": "action",
       "codecFingerprint": "fp:v1:2daec14fd99835e3a1ea383c80359588f330b0d913ab0a13c9b947380fe17ebf",
@@ -187,7 +265,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.DevelopersPage#setup0.local.action@1": {
-      "stableID": "43805db0",
+      "stableID": "f49d5ddb",
       "class": "local",
       "kind": "action",
       "codecFingerprint": "fp:v1:d7d7e96309bd7c12dc347481a0351d84a6b18616037a2252686623c854502123",
@@ -200,7 +278,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.DevelopersPage#setup0.local.resource@0": {
-      "stableID": "13403582",
+      "stableID": "e3cdd864",
       "class": "local",
       "kind": "resource",
       "codecFingerprint": "fp:v1:439b6889bc1b552063f3c4b521f1ed567b3bd2ab91e5e23cd6e0d9c0af927e14",
@@ -213,7 +291,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.DevelopersPage#setup0.local.signal@0": {
-      "stableID": "3f0a996b",
+      "stableID": "dac9a88f",
       "class": "local",
       "kind": "signal",
       "codecFingerprint": "fp:v1:30a63eee6dca6c358b70d73211e051d443c38b6afee573489505c9b7d3b8dcbf",
@@ -226,7 +304,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.DevelopersPage#setup0.local.signal@1": {
-      "stableID": "5ee8243a",
+      "stableID": "56f8410a",
       "class": "local",
       "kind": "signal",
       "codecFingerprint": "fp:v1:30a63eee6dca6c358b70d73211e051d443c38b6afee573489505c9b7d3b8dcbf",
@@ -239,7 +317,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.DevelopersPage#setup0.local.signal@2": {
-      "stableID": "5c3de9bb",
+      "stableID": "ea2f8264",
       "class": "local",
       "kind": "signal",
       "codecFingerprint": "fp:v1:21ffeba73e1a0b295f09ee478f019089666a9f8d2417e4fc030e0d6ccefc9519",
@@ -252,7 +330,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.HomePage#setup0.local.action@0": {
-      "stableID": "90c5f24e",
+      "stableID": "6906d7ab",
       "class": "local",
       "kind": "action",
       "codecFingerprint": "fp:v1:477df8582f751b98ee7d050d85782011d752fde32159170b23d074e686b1874a",
@@ -265,7 +343,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.HomePage#setup0.local.effect@0": {
-      "stableID": "f5dbeeff",
+      "stableID": "55aea610",
       "class": "local",
       "kind": "effect",
       "codecFingerprint": "fp:v1:bb2c9bbd8e42d1c77679ba12b77cdd888a502ceddd40605a33803cabc6da2578",
@@ -278,7 +356,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.HomePage#setup0.local.effect@1": {
-      "stableID": "666b11b0",
+      "stableID": "153e026a",
       "class": "local",
       "kind": "effect",
       "codecFingerprint": "fp:v1:bb2c9bbd8e42d1c77679ba12b77cdd888a502ceddd40605a33803cabc6da2578",
@@ -291,7 +369,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.HomePage#setup0.local.resource@0": {
-      "stableID": "345e3505",
+      "stableID": "8d8e7214",
       "class": "local",
       "kind": "resource",
       "codecFingerprint": "fp:v1:79d819bf69474082f843f088decf9582346231372055e29e617a3180aac6cf15",
@@ -304,7 +382,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.HomePage#setup0.local.signal@0": {
-      "stableID": "a279e41a",
+      "stableID": "96ccb356",
       "class": "local",
       "kind": "signal",
       "codecFingerprint": "fp:v1:a0e185526259a5c89de3668f26ecdd3229878df677ad6713dd7b0a2027752c16",
@@ -317,7 +395,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.HomePage#setup0.local.signal@1": {
-      "stableID": "3861d93d",
+      "stableID": "ec2979bd",
       "class": "local",
       "kind": "signal",
       "codecFingerprint": "fp:v1:30a63eee6dca6c358b70d73211e051d443c38b6afee573489505c9b7d3b8dcbf",
@@ -330,7 +408,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.KeysPage#setup0.local.action@0": {
-      "stableID": "120914b6",
+      "stableID": "ff74f87b",
       "class": "local",
       "kind": "action",
       "codecFingerprint": "fp:v1:7ac69785e1bc1b517b1cbdfa76fd0dfa4a1c20b2d974aab865f5feb20424e457",
@@ -343,7 +421,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.KeysPage#setup0.local.action@1": {
-      "stableID": "8af64820",
+      "stableID": "15bcf605",
       "class": "local",
       "kind": "action",
       "codecFingerprint": "fp:v1:d7d7e96309bd7c12dc347481a0351d84a6b18616037a2252686623c854502123",
@@ -356,7 +434,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.KeysPage#setup0.local.resource@0": {
-      "stableID": "ce93fd48",
+      "stableID": "eb63ebea",
       "class": "local",
       "kind": "resource",
       "codecFingerprint": "fp:v1:ae5203d202e0ec5cc7c255065bf5bbb12f3e904c30a7acce3df10ba3449fb38e",
@@ -369,7 +447,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.KeysPage#setup0.local.signal@0": {
-      "stableID": "2c0fb111",
+      "stableID": "915a9813",
       "class": "local",
       "kind": "signal",
       "codecFingerprint": "fp:v1:30a63eee6dca6c358b70d73211e051d443c38b6afee573489505c9b7d3b8dcbf",
@@ -382,7 +460,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.KeysPage#setup0.local.signal@1": {
-      "stableID": "bbed5217",
+      "stableID": "c4a362b6",
       "class": "local",
       "kind": "signal",
       "codecFingerprint": "fp:v1:30a63eee6dca6c358b70d73211e051d443c38b6afee573489505c9b7d3b8dcbf",
@@ -395,7 +473,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.KeysPage#setup0.local.signal@2": {
-      "stableID": "95ff0730",
+      "stableID": "4cb0121a",
       "class": "local",
       "kind": "signal",
       "codecFingerprint": "fp:v1:30a63eee6dca6c358b70d73211e051d443c38b6afee573489505c9b7d3b8dcbf",
@@ -408,7 +486,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.ObservabilityPage#setup0.local.resource@0": {
-      "stableID": "4f9b098a",
+      "stableID": "a72823d7",
       "class": "local",
       "kind": "resource",
       "codecFingerprint": "fp:v1:439b6889bc1b552063f3c4b521f1ed567b3bd2ab91e5e23cd6e0d9c0af927e14",
@@ -421,7 +499,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.ObservabilityPage#setup0.local.resource@1": {
-      "stableID": "209b86a5",
+      "stableID": "0368aa6f",
       "class": "local",
       "kind": "resource",
       "codecFingerprint": "fp:v1:4bb35ebb94bcbbfbaa7b61551a25fdb5f25fe6efed3d2b71525839d430fb71cb",
@@ -434,7 +512,7 @@
       }
     },
     "github.com/vango-go/vai-lite/app/components.SettingsOverviewPage#setup0.local.resource@0": {
-      "stableID": "48288473",
+      "stableID": "6d8532f0",
       "class": "local",
       "kind": "resource",
       "codecFingerprint": "fp:v1:d24f3a7ccfcc0e9aba844e310fe0c996952919262fb88a65a38ac65d72777d2d",
