@@ -6,6 +6,7 @@ import (
 	"strings"
 )
 
+// test commit
 type jsonPathSegment struct {
 	key   string
 	index int
