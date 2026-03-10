@@ -2,16 +2,16 @@ package components
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/vango-go/vai-lite/internal/appruntime"
 	"github.com/vango-go/vai-lite/internal/chatruntime"
 	"github.com/vango-go/vai-lite/internal/services"
+	"github.com/vango-go/vai-lite/sdk"
+	"github.com/vango-go/vai-lite/pkg/core/types"
 	"github.com/vango-go/vango"
 	. "github.com/vango-go/vango/el"
 	"github.com/vango-go/vango/setup"
@@ -25,7 +25,7 @@ type ChatPageProps struct {
 type chatPageData struct {
 	Org             *services.Organization
 	Conversations   []services.Conversation
-	Detail          *services.ConversationDetail
+	Detail          *services.ManagedConversationDetail
 	ProviderSecrets []services.ProviderSecretRecord
 	CurrentBalance  chatBalanceState
 	Messages        []map[string]any
@@ -37,12 +37,14 @@ type chatStaticData struct {
 }
 
 type chatConversationData struct {
-	Detail   *services.ConversationDetail
+	Detail   *services.ManagedConversationDetail
 	Messages []map[string]any
 }
 
 type chatSubmitResult struct {
 	KeySource services.KeySource
+	ChainID   string
+	Transport string
 }
 
 type chatBalanceState struct {
@@ -84,7 +86,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 		conversations := setup.ResourceKeyed(&s,
 			func() string { return props.Get().Actor.OrgID },
 			func(ctx context.Context, orgID string) ([]services.Conversation, error) {
-				items, err := appruntime.Get().Services.ListConversations(ctx, orgID)
+				items, err := appruntime.Get().Services.ListManagedConversations(ctx, orgID)
 				if err != nil {
 					return nil, fmt.Errorf("load conversations: %w", err)
 				}
@@ -103,11 +105,11 @@ func ChatPage(p ChatPageProps) vango.Component {
 			},
 			func(ctx context.Context, _ string) (*chatConversationData, error) {
 				current := props.Peek()
-				detail, err := appruntime.Get().Services.Conversation(ctx, current.Actor.OrgID, current.ConversationID)
+				detail, err := appruntime.Get().Services.ManagedConversation(ctx, current.Actor.OrgID, current.ConversationID)
 				if err != nil {
 					return nil, fmt.Errorf("load conversation: %w", err)
 				}
-				messageViews, err := chatMessagesView(ctx, detail)
+				messageViews, err := chatMessagesViewManaged(ctx, current.Actor.OrgID, detail)
 				if err != nil {
 					return nil, fmt.Errorf("prepare messages: %w", err)
 				}
@@ -140,26 +142,6 @@ func ChatPage(p ChatPageProps) vango.Component {
 			lastBalanceData.Set(state)
 		})
 
-		newConversation := setup.Action(&s,
-			func(ctx context.Context, _ struct{}) (*services.Conversation, error) {
-				return appruntime.Get().Services.CreateConversation(
-					ctx,
-					props.Peek().Actor,
-					"",
-					appruntime.Get().Config.DefaultModel,
-					services.KeySourcePlatformHosted,
-				)
-			},
-			vango.DropWhileRunning(),
-			vango.ActionOnSuccess(func(result any) {
-				conversation, ok := result.(*services.Conversation)
-				if !ok || conversation == nil {
-					return
-				}
-				pendingConversationID.Set(conversation.ID)
-			}),
-		)
-
 		s.Effect(func() vango.Cleanup {
 			if conversationID := pendingConversationID.Get(); conversationID != "" {
 				if ctx := vango.UseCtx(); ctx != nil {
@@ -172,9 +154,68 @@ func ChatPage(p ChatPageProps) vango.Component {
 
 		var activeRunMu sync.Mutex
 		var activeRunRequestID string
-		var activeRunCancel context.CancelFunc
+		var activeRunCancel func()
+		var gatewayMu sync.Mutex
+		var gatewayProxy *chatruntime.InProcessGateway
+		var wsChain *vai.Chain
+		var wsChainConversationID string
+		var wsCredentialSignature string
+		var trackedChainID string
+		var trackedResumeToken string
 
-		setActiveRun := func(requestID string, cancel context.CancelFunc) {
+		ensureGatewayProxy := func() (*chatruntime.InProcessGateway, error) {
+			gatewayMu.Lock()
+			defer gatewayMu.Unlock()
+			if gatewayProxy != nil {
+				return gatewayProxy, nil
+			}
+			proxy, err := chatruntime.NewInProcessGateway(appruntime.Get().Gateway)
+			if err != nil {
+				return nil, err
+			}
+			gatewayProxy = proxy
+			return gatewayProxy, nil
+		}
+		closeWSChain := func() {
+			gatewayMu.Lock()
+			chain := wsChain
+			wsChain = nil
+			wsChainConversationID = ""
+			wsCredentialSignature = ""
+			gatewayMu.Unlock()
+			if chain != nil {
+				_ = chain.Close()
+			}
+		}
+		setTrackedChain := func(chainID, resumeToken string) {
+			gatewayMu.Lock()
+			trackedChainID = strings.TrimSpace(chainID)
+			if trimmed := strings.TrimSpace(resumeToken); trimmed != "" {
+				trackedResumeToken = trimmed
+			} else if trackedChainID == "" {
+				trackedResumeToken = ""
+			}
+			gatewayMu.Unlock()
+		}
+		currentTrackedChain := func() (string, string) {
+			gatewayMu.Lock()
+			defer gatewayMu.Unlock()
+			return trackedChainID, trackedResumeToken
+		}
+		s.Effect(func() vango.Cleanup {
+			return func() {
+				closeWSChain()
+				gatewayMu.Lock()
+				proxy := gatewayProxy
+				gatewayProxy = nil
+				gatewayMu.Unlock()
+				if proxy != nil {
+					proxy.Close()
+				}
+			}
+		})
+
+		setActiveRun := func(requestID string, cancel func()) {
 			activeRunMu.Lock()
 			activeRunRequestID = requestID
 			activeRunCancel = cancel
@@ -209,7 +250,33 @@ func ChatPage(p ChatPageProps) vango.Component {
 
 		uploadIntent := setup.Action(&s,
 			func(ctx context.Context, in chatUploadIntentCommand) (struct{}, error) {
-				intent, err := appruntime.Get().Services.CreateImageUploadIntent(ctx, props.Peek().Actor, in.Filename, in.ContentType, in.SizeBytes)
+				proxy, err := ensureGatewayProxy()
+				if err != nil {
+					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
+						Type:      "upload_intent_error",
+						RequestID: in.RequestID,
+						Error:     err.Error(),
+					})
+					return struct{}{}, err
+				}
+				client, err := proxy.Client(props.Peek().Actor, nil)
+				if err != nil {
+					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
+						Type:      "upload_intent_error",
+						RequestID: in.RequestID,
+						Error:     err.Error(),
+					})
+					return struct{}{}, err
+				}
+				intent, err := client.Assets.CreateUploadIntent(ctx, &types.AssetUploadIntentRequest{
+					Filename:    in.Filename,
+					ContentType: in.ContentType,
+					SizeBytes:   in.SizeBytes,
+					Metadata: map[string]any{
+						"external_session_id": props.Peek().ConversationID,
+						"source":              "platform_chat",
+					},
+				})
 				if err != nil {
 					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
 						Type:      "upload_intent_error",
@@ -230,16 +297,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 
 		uploadClaim := setup.Action(&s,
 			func(ctx context.Context, in chatUploadClaimCommand) (struct{}, error) {
-				attachment, err := appruntime.Get().Services.ClaimImageAttachment(
-					ctx,
-					props.Peek().Actor,
-					props.Peek().ConversationID,
-					"",
-					in.Filename,
-					in.ContentType,
-					in.SizeBytes,
-					in.IntentToken,
-				)
+				proxy, err := ensureGatewayProxy()
 				if err != nil {
 					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
 						Type:      "upload_claim_error",
@@ -248,10 +306,51 @@ func ChatPage(p ChatPageProps) vango.Component {
 					})
 					return struct{}{}, err
 				}
+				client, err := proxy.Client(props.Peek().Actor, nil)
+				if err != nil {
+					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
+						Type:      "upload_claim_error",
+						RequestID: in.RequestID,
+						Error:     err.Error(),
+					})
+					return struct{}{}, err
+				}
+				asset, err := client.Assets.Claim(ctx, &types.AssetClaimRequest{
+					IntentToken: in.IntentToken,
+					Filename:    in.Filename,
+					ContentType: in.ContentType,
+					Metadata: map[string]any{
+						"external_session_id": props.Peek().ConversationID,
+						"source":              "platform_chat",
+					},
+				})
+				if err != nil {
+					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
+						Type:      "upload_claim_error",
+						RequestID: in.RequestID,
+						Error:     err.Error(),
+					})
+					return struct{}{}, err
+				}
+				signed, signErr := client.Assets.Sign(ctx, asset.ID)
+				if signErr != nil {
+					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
+						Type:      "upload_claim_error",
+						RequestID: in.RequestID,
+						Error:     signErr.Error(),
+					})
+					return struct{}{}, signErr
+				}
 				dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-					Type:       "upload_claim_ready",
-					RequestID:  in.RequestID,
-					Attachment: buildChatAttachmentPayload(ctx, attachment),
+						Type:      "upload_claim_ready",
+						RequestID: in.RequestID,
+						Attachment: &chatAttachmentPayload{
+							ID:          asset.ID,
+							Filename:    firstNonEmpty(in.Filename, asset.ID),
+							ContentType: firstNonEmpty(asset.MediaType, in.ContentType),
+							SizeBytes:   asset.SizeBytes,
+							URL:         signed.URL,
+						},
 				})
 				return struct{}{}, nil
 			},
@@ -261,24 +360,24 @@ func ChatPage(p ChatPageProps) vango.Component {
 		submitChat := setup.Action(&s,
 			func(ctx context.Context, in chatSubmitCommand) (chatSubmitResult, error) {
 				actor := props.Peek().Actor
-				if in.RequestID == "" {
-					err := errors.New("chat request id is required")
+				fail := func(err error) (chatSubmitResult, error) {
+					if err == nil {
+						err = errors.New("chat request failed")
+					}
 					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
 						Type:      "chat_error",
 						RequestID: in.RequestID,
-						Error:     err.Error(),
+						Error:     strings.TrimSpace(err.Error()),
 					})
 					return chatSubmitResult{}, err
+				}
+				if in.RequestID == "" {
+					return fail(errors.New("chat request id is required"))
 				}
 
 				org, err := appruntime.Get().Services.Org(ctx, actor.OrgID)
 				if err != nil {
-					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-						Type:      "chat_error",
-						RequestID: in.RequestID,
-						Error:     err.Error(),
-					})
-					return chatSubmitResult{}, err
+					return fail(err)
 				}
 
 				model := strings.TrimSpace(in.Model)
@@ -294,114 +393,186 @@ func ChatPage(p ChatPageProps) vango.Component {
 					services.AccessCredentialSessionAuth,
 				)
 				if err != nil {
-					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-						Type:      "chat_error",
-						RequestID: in.RequestID,
-						Error:     err.Error(),
-					})
-					return chatSubmitResult{}, err
+					return fail(err)
 				}
 				if keySource == services.KeySourcePlatformHosted {
 					if err := appruntime.Get().Services.ReservePlatformHostedUsage(ctx, actor.OrgID, model); err != nil {
-						dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-							Type:      "chat_error",
-							RequestID: in.RequestID,
-							Error:     err.Error(),
-						})
-						return chatSubmitResult{}, err
+						return fail(err)
 					}
 				}
 
-				if err := appruntime.Get().Services.UpdateConversationSettings(ctx, actor, props.Peek().ConversationID, model, keySource); err != nil {
-					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-						Type:      "chat_error",
-						RequestID: in.RequestID,
-						Error:     err.Error(),
+				detail, err := appruntime.Get().Services.ManagedConversation(ctx, actor.OrgID, props.Peek().ConversationID)
+				if err != nil {
+					return fail(err)
+				}
+				runPlan, err := buildManagedRunPlan(detail, in.Message, in.AttachmentIDs, in.Regenerate, in.EditMessageID)
+				if err != nil {
+					return fail(err)
+				}
+				if len(runPlan.Input) == 0 {
+					return fail(errors.New("chat input is required"))
+				}
+
+				proxy, err := ensureGatewayProxy()
+				if err != nil {
+					return fail(err)
+				}
+				client, err := proxy.Client(actor, resolvedHeaders)
+				if err != nil {
+					return fail(err)
+				}
+
+				selectedTransport := normalizeChatTransport(in.Transport)
+				credentialSignature := chatCredentialSignature(resolvedHeaders, keySource)
+				gatewayTools, gatewayToolConfig := chatruntime.ConversationServerTools(resolvedHeaders)
+				runMetadata := chatRunMetadata(keySource, selectedTransport)
+				chainMetadata := chatChainMetadata(keySource, selectedTransport, props.Peek().ConversationID)
+
+				currentChainID, currentResumeToken := currentTrackedChain()
+				if strings.TrimSpace(currentChainID) == "" && detail != nil && detail.Chain != nil {
+					currentChainID = strings.TrimSpace(detail.Chain.ID)
+				}
+
+				var chain *vai.Chain
+				if runPlan.Forked {
+					closeWSChain()
+				} else {
+					switch selectedTransport {
+					case chatTransportSSE:
+						closeWSChain()
+						if currentChainID != "" {
+							chain, err = client.Chains.Attach(ctx, &vai.ChainAttachRequest{
+								ChainID:     currentChainID,
+								ResumeToken: currentResumeToken,
+								Transport:   vai.TransportSSE,
+							})
+							if err != nil {
+								return fail(err)
+							}
+						}
+					case chatTransportWebsocket:
+						gatewayMu.Lock()
+						existingWS := wsChain
+						existingConversationID := wsChainConversationID
+						existingSignature := wsCredentialSignature
+						gatewayMu.Unlock()
+						if existingWS != nil &&
+							existingConversationID == props.Peek().ConversationID &&
+							existingSignature == credentialSignature &&
+							existingWS.ID() == currentChainID {
+							chain = existingWS
+						} else {
+							if existingWS != nil {
+								closeWSChain()
+							}
+							if currentChainID != "" && strings.TrimSpace(currentResumeToken) != "" {
+								chain, err = client.Chains.Attach(ctx, &vai.ChainAttachRequest{
+									ChainID:     currentChainID,
+									ResumeToken: currentResumeToken,
+									Takeover:    true,
+									Transport:   vai.TransportWebSocket,
+								})
+								if err != nil {
+									return fail(err)
+								}
+								gatewayMu.Lock()
+								wsChain = chain
+								wsChainConversationID = props.Peek().ConversationID
+								wsCredentialSignature = credentialSignature
+								gatewayMu.Unlock()
+							}
+						}
+					}
+				}
+
+				if chain == nil {
+					connectTransport := vai.TransportSSE
+					if selectedTransport == chatTransportWebsocket {
+						connectTransport = vai.TransportWebSocket
+					}
+					chain, err = client.Chains.Connect(ctx, &vai.ChainRequest{
+						ExternalSessionID: props.Peek().ConversationID,
+						Model:             model,
+						Messages:          runPlan.SeedHistory,
+						GatewayTools:      gatewayTools,
+						GatewayToolConfig: gatewayToolConfig,
+						Metadata:          chainMetadata,
+						Transport:         connectTransport,
 					})
-					return chatSubmitResult{}, err
-				}
-
-				switch {
-				case in.EditMessageID != "":
-					if err := appruntime.Get().Services.ReviseUserMessage(ctx, actor, props.Peek().ConversationID, in.EditMessageID, in.Message); err != nil {
-						dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-							Type:      "chat_error",
-							RequestID: in.RequestID,
-							Error:     err.Error(),
-						})
-						return chatSubmitResult{}, err
-					}
-				case in.Regenerate:
-					detail, err := appruntime.Get().Services.Conversation(ctx, actor.OrgID, props.Peek().ConversationID)
 					if err != nil {
-						dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-							Type:      "chat_error",
-							RequestID: in.RequestID,
-							Error:     err.Error(),
-						})
-						return chatSubmitResult{}, err
+						return fail(err)
 					}
-					lastUserID := chatruntime.LastUserMessageID(detail.Messages)
-					if lastUserID == "" {
-						err := errors.New("conversation has no user message to regenerate from")
-						dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-							Type:      "chat_error",
-							RequestID: in.RequestID,
-							Error:     err.Error(),
-						})
-						return chatSubmitResult{}, err
-					}
-					if err := appruntime.Get().Services.TruncateConversationAfter(ctx, actor, props.Peek().ConversationID, lastUserID); err != nil {
-						dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-							Type:      "chat_error",
-							RequestID: in.RequestID,
-							Error:     err.Error(),
-						})
-						return chatSubmitResult{}, err
-					}
-				default:
-					if _, err := appruntime.Get().Services.AddUserMessage(ctx, actor, props.Peek().ConversationID, in.Message, keySource, in.AttachmentIDs); err != nil {
-						dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-							Type:      "chat_error",
-							RequestID: in.RequestID,
-							Error:     err.Error(),
-						})
-						return chatSubmitResult{}, err
+					if selectedTransport == chatTransportWebsocket {
+						gatewayMu.Lock()
+						wsChain = chain
+						wsChainConversationID = props.Peek().ConversationID
+						wsCredentialSignature = credentialSignature
+						gatewayMu.Unlock()
 					}
 				}
-
-				detail, err := appruntime.Get().Services.Conversation(ctx, actor.OrgID, props.Peek().ConversationID)
-				if err != nil {
-					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-						Type:      "chat_error",
-						RequestID: in.RequestID,
-						Error:     err.Error(),
-					})
-					return chatSubmitResult{}, err
-				}
-				runReq, err := chatruntime.BuildConversationRunRequest(ctx, appruntime.Get().Services.BlobStore, detail, resolvedHeaders)
-				if err != nil {
-					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-						Type:      "chat_error",
-						RequestID: in.RequestID,
-						Error:     err.Error(),
-					})
-					return chatSubmitResult{}, err
-				}
-				runReq.Request.Model = model
+				setTrackedChain(chain.ID(), chain.ResumeToken())
 
 				dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
 					Type:      "chat_started",
 					RequestID: in.RequestID,
 				})
 
-				runCtx, cancel := context.WithCancel(ctx)
-				setActiveRun(in.RequestID, cancel)
+				runCtx, cancelRun := context.WithCancel(ctx)
+				stream, err := chain.RunStream(runCtx, &vai.ChainRunRequest{
+					Input:             runPlan.Input,
+					Model:             model,
+					GatewayTools:      gatewayTools,
+					GatewayToolConfig: gatewayToolConfig,
+					Metadata:          runMetadata,
+				})
+				if err != nil {
+					cancelRun()
+					return fail(err)
+				}
+				setActiveRun(in.RequestID, func() {
+					cancelRun()
+					_ = stream.Cancel()
+				})
 				defer clearActiveRun(in.RequestID)
 
-				streamResult, err := chatruntime.StreamConversationRun(runCtx, appruntime.Get().Gateway, runReq, resolvedHeaders, func(event chatruntime.SSEEvent) {
-					relayChatStreamEvent(pageCtx, in.HID, in.RequestID, event)
+				_, err = stream.Process(vai.StreamCallbacks{
+					OnTextDelta: func(text string) {
+						dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
+							Type:      "chat_delta",
+							RequestID: in.RequestID,
+							Delta:     text,
+						})
+					},
+					OnToolCallStart: func(id, name string, input map[string]any) {
+						dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
+							Type:      "chat_tool",
+							RequestID: in.RequestID,
+							Tool: map[string]any{
+								"type":  "tool_call_start",
+								"id":    id,
+								"name":  name,
+								"input": input,
+							},
+						})
+					},
+					OnToolResult: func(id, name string, content []types.ContentBlock, toolErr error) {
+						payload := map[string]any{
+							"type":    "tool_result",
+							"id":      id,
+							"name":    name,
+							"content": content,
+						}
+						if toolErr != nil {
+							payload["error"] = toolErr.Error()
+						}
+						dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
+							Type:      "chat_tool",
+							RequestID: in.RequestID,
+							Tool:      payload,
+						})
+					},
 				})
+				cancelRun()
 				if err != nil {
 					if errors.Is(err, context.Canceled) {
 						dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
@@ -410,51 +581,21 @@ func ChatPage(p ChatPageProps) vango.Component {
 						})
 						return chatSubmitResult{}, err
 					}
-					message := strings.TrimSpace(err.Error())
-					var gatewayErr *chatruntime.GatewayError
-					if errors.As(err, &gatewayErr) && strings.TrimSpace(gatewayErr.Message) != "" {
-						message = strings.TrimSpace(gatewayErr.Message)
-					}
-					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-						Type:      "chat_error",
-						RequestID: in.RequestID,
-						Error:     message,
-					})
-					return chatSubmitResult{}, err
-				}
-				if streamResult == nil || streamResult.Result == nil || streamResult.Result.Response == nil {
-					message := "conversation completed without a response"
-					if streamResult != nil && len(streamResult.Raw) > 0 {
-						runErr, extractErr := chatruntime.ExtractRunErrorMessage(streamResult.Raw)
-						if extractErr == nil && strings.TrimSpace(runErr) != "" {
-							message = strings.TrimSpace(runErr)
-						}
-					}
-					err := errors.New(message)
-					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-						Type:      "chat_error",
-						RequestID: in.RequestID,
-						Error:     message,
-					})
-					return chatSubmitResult{}, err
+					return fail(err)
 				}
 
-				if _, err := appruntime.Get().Services.AddAssistantMessage(
-					ctx,
-					actor,
-					props.Peek().ConversationID,
-					streamResult.Result.Response.TextContent(),
-					keySource,
-					streamResult.Result.Usage,
-					streamResult.Result.Steps,
-				); err != nil {
+				result := stream.Result()
+				if result != nil && result.StopReason == types.RunStopReasonCancelled {
 					dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
-						Type:      "chat_error",
+						Type:      "chat_stopped",
 						RequestID: in.RequestID,
-						Error:     err.Error(),
 					})
-					return chatSubmitResult{}, err
+					return chatSubmitResult{}, context.Canceled
 				}
+				if result == nil || result.Response == nil {
+					return fail(errors.New("conversation completed without a response"))
+				}
+				setTrackedChain(chain.ID(), chain.ResumeToken())
 				if err := appruntime.Get().Services.RecordUsage(
 					ctx,
 					actor.OrgID,
@@ -464,8 +605,14 @@ func ChatPage(p ChatPageProps) vango.Component {
 					model,
 					keySource,
 					services.AccessCredentialSessionAuth,
-					streamResult.Result.Usage,
-					map[string]any{"via": "chat_island"},
+					result.Usage,
+					map[string]any{
+						"via":        "chat_island",
+						"chain_id":   chain.ID(),
+						"transport":  selectedTransport,
+						"regenerate": in.Regenerate,
+						"edited":     in.EditMessageID != "",
+					},
 				); err != nil {
 					appruntime.Get().Logger.Error("record usage failed", "error", err)
 				}
@@ -473,16 +620,23 @@ func ChatPage(p ChatPageProps) vango.Component {
 				dispatchChatIsland(pageCtx, in.HID, chatServerMessage{
 					Type:      "chat_complete",
 					RequestID: in.RequestID,
-					Assistant: buildChatAssistantPayload(streamResult.Result, keySource),
+					Assistant: buildChatAssistantPayload(result, keySource),
 				})
-				return chatSubmitResult{KeySource: keySource}, nil
+				return chatSubmitResult{
+					KeySource: keySource,
+					ChainID:   chain.ID(),
+					Transport: selectedTransport,
+				}, nil
 			},
 			vango.DropWhileRunning(),
 			vango.ActionOnSuccess(func(result any) {
 				conversationData.Refetch()
 				conversations.Refetch()
-				if submitResult, ok := result.(chatSubmitResult); ok && submitResult.KeySource == services.KeySourcePlatformHosted {
-					balanceData.Refetch()
+				if submitResult, ok := result.(chatSubmitResult); ok {
+					setTrackedChain(submitResult.ChainID, "")
+					if submitResult.KeySource == services.KeySourcePlatformHosted {
+						balanceData.Refetch()
+					}
 				}
 			}),
 		)
@@ -535,6 +689,7 @@ func ChatPage(p ChatPageProps) vango.Component {
 					Message:       payload.Message,
 					Model:         payload.Model,
 					KeySource:     requestedMode,
+					Transport:     normalizeChatTransport(payload.Transport),
 					AttachmentIDs: append([]string(nil), payload.AttachmentIDs...),
 					Regenerate:    payload.Regenerate,
 					EditMessageID: payload.EditMessageID,
@@ -609,8 +764,8 @@ func ChatPage(p ChatPageProps) vango.Component {
 			return AppShell(ctx, actor,
 				Div(
 					Class("chat-page"),
-					Sidebar(actor, data.Conversations, data.Detail.Conversation.ID, newConversation.IsRunning(), func() {
-						newConversation.Run(struct{}{})
+					Sidebar(actor, data.Conversations, data.Detail.Conversation.ID, false, func() {
+						pendingConversationID.Set(newDraftConversationID())
 					}),
 					Main(
 						Class("chat-main"),
@@ -721,49 +876,10 @@ func chatIslandProps(data *chatPageData, balance chatBalanceState) map[string]an
 		"settingsAccessURL":     "/settings/access",
 		"currentBalanceStatus":  balance.Status,
 		"hostedModels":          hostedModelOptions(data.Detail.Conversation.Model),
+		"initialTransport":      normalizeChatTransport(data.Detail.PreferredTransport),
 	}
 	if balance.Status == chatBalanceStatusReady {
 		props["currentBalanceCents"] = balance.CurrentBalanceCents
 	}
 	return props
-}
-
-func chatMessagesView(ctx context.Context, detail *services.ConversationDetail) ([]map[string]any, error) {
-	out := make([]map[string]any, 0, len(detail.Messages))
-	for _, msg := range detail.Messages {
-		attachments := make([]map[string]any, 0, len(msg.Attachments))
-		for _, att := range msg.Attachments {
-			attachmentURL := ""
-			if appruntime.Get().Services.BlobStore != nil {
-				signed, err := appruntime.Get().Services.BlobStore.PresignGet(ctx, att.BlobRef.Key, 30*time.Minute)
-				if err != nil {
-					return nil, err
-				}
-				attachmentURL = signed
-			}
-			attachments = append(attachments, map[string]any{
-				"id":          att.ID,
-				"filename":    att.Filename,
-				"contentType": att.ContentType,
-				"sizeBytes":   att.SizeBytes,
-				"url":         attachmentURL,
-			})
-		}
-
-		var toolTrace any
-		if strings.TrimSpace(msg.ToolTrace) != "" && msg.ToolTrace != "null" {
-			_ = json.Unmarshal([]byte(msg.ToolTrace), &toolTrace)
-		}
-
-		out = append(out, map[string]any{
-			"id":          msg.ID,
-			"role":        msg.Role,
-			"text":        msg.BodyText,
-			"keySource":   string(msg.KeySource),
-			"createdAt":   msg.CreatedAt.Format(time.RFC3339),
-			"attachments": attachments,
-			"toolTrace":   toolTrace,
-		})
-	}
-	return out, nil
 }

@@ -302,7 +302,7 @@ type testConversationStore struct {
 func (s *testConversationStore) db() *neon.TestDB {
 	return &neon.TestDB{
 		QueryFunc: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-			if !strings.Contains(sql, "FROM conversations") {
+			if !strings.Contains(sql, "FROM vai_sessions") {
 				return nil, fmt.Errorf("unexpected query: %s", strings.TrimSpace(sql))
 			}
 			if s.release != nil {
@@ -431,6 +431,12 @@ func (s *testObservabilityStore) db() *neon.TestDB {
 	return &neon.TestDB{
 		QueryFunc: func(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
 			switch {
+			case strings.Contains(sql, "FROM vai_sessions"):
+				return newTestRows(), nil
+			case strings.Contains(sql, "FROM vai_chains"):
+				return newTestRows(), nil
+			case strings.Contains(sql, "FROM vai_runs"):
+				return newTestRows(), nil
 			case strings.Contains(sql, "FROM gateway_request_logs l"):
 				rows := make([][]any, 0, len(s.logs))
 				for _, item := range s.logs {

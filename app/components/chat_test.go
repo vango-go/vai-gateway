@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/vango-go/vai-lite/internal/services"
+	"github.com/vango-go/vai-lite/pkg/core/types"
 	"github.com/vango-go/vango"
 	neon "github.com/vango-go/vango-neon"
 	"github.com/vango-go/vango/pkg/vtest"
@@ -71,7 +72,7 @@ func TestChatPageMarksBalanceUnavailableWithoutZeroFallback(t *testing.T) {
 
 func TestChatResolveConversationDataKeepsSameConversationSnapshotDuringLoading(t *testing.T) {
 	last := &chatConversationData{
-		Detail: &services.ConversationDetail{
+		Detail: &services.ManagedConversationDetail{
 			Conversation: services.Conversation{ID: "conv_123"},
 		},
 		Messages: []map[string]any{{"id": "msg_1"}},
@@ -91,7 +92,7 @@ func TestChatResolveConversationDataKeepsSameConversationSnapshotDuringLoading(t
 
 func TestChatResolveConversationDataRejectsDifferentConversationSnapshot(t *testing.T) {
 	last := &chatConversationData{
-		Detail: &services.ConversationDetail{
+		Detail: &services.ManagedConversationDetail{
 			Conversation: services.Conversation{ID: "conv_old"},
 		},
 	}
@@ -145,6 +146,81 @@ func TestChatResolveBalanceDataFallsBackToLoadingWithoutReadySnapshot(t *testing
 	}
 }
 
+func TestBuildManagedRunPlan_RegenerateForksFromPriorHistory(t *testing.T) {
+	detail := &services.ManagedConversationDetail{
+		History: []types.Message{
+			{Role: "user", Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "hello"}}},
+			{Role: "assistant", Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "hi"}}},
+			{Role: "user", Content: []types.ContentBlock{
+				types.TextBlock{Type: "text", Text: "what is the weather"},
+				types.ImageBlock{Type: "image", Source: types.ImageSource{Type: types.AssetSourceType, AssetID: "asset_weather"}},
+			}},
+			{Role: "assistant", Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "sunny"}}},
+		},
+	}
+
+	plan, err := buildManagedRunPlan(detail, "", nil, true, "")
+	if err != nil {
+		t.Fatalf("buildManagedRunPlan() error = %v", err)
+	}
+	if !plan.Forked {
+		t.Fatal("expected regenerate plan to fork")
+	}
+	if got := len(plan.SeedHistory); got != 2 {
+		t.Fatalf("len(seed_history)=%d, want 2", got)
+	}
+	if got := len(plan.Input); got != 2 {
+		t.Fatalf("len(input)=%d, want 2", got)
+	}
+	text, ok := plan.Input[0].(types.TextBlock)
+	if !ok || text.Text != "what is the weather" {
+		t.Fatalf("regenerate input[0]=%#v", plan.Input[0])
+	}
+	image, ok := plan.Input[1].(types.ImageBlock)
+	if !ok || image.Source.AssetID != "asset_weather" {
+		t.Fatalf("regenerate input[1]=%#v", plan.Input[1])
+	}
+}
+
+func TestBuildManagedRunPlan_EditReusesNonTextBlocksAndAddsNewAttachments(t *testing.T) {
+	detail := &services.ManagedConversationDetail{
+		History: []types.Message{
+			{Role: "user", Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "hello"}}},
+			{Role: "assistant", Content: []types.ContentBlock{types.TextBlock{Type: "text", Text: "hi"}}},
+			{Role: "user", Content: []types.ContentBlock{
+				types.TextBlock{Type: "text", Text: "draft"},
+				types.ImageBlock{Type: "image", Source: types.ImageSource{Type: types.AssetSourceType, AssetID: "asset_existing"}},
+			}},
+		},
+	}
+
+	plan, err := buildManagedRunPlan(detail, "edited copy", []string{"asset_new"}, false, managedChatMessageID(2))
+	if err != nil {
+		t.Fatalf("buildManagedRunPlan() error = %v", err)
+	}
+	if !plan.Forked {
+		t.Fatal("expected edit plan to fork")
+	}
+	if got := len(plan.SeedHistory); got != 2 {
+		t.Fatalf("len(seed_history)=%d, want 2", got)
+	}
+	if got := len(plan.Input); got != 3 {
+		t.Fatalf("len(input)=%d, want 3", got)
+	}
+	text, ok := plan.Input[0].(types.TextBlock)
+	if !ok || text.Text != "edited copy" {
+		t.Fatalf("edit input[0]=%#v", plan.Input[0])
+	}
+	existing, ok := plan.Input[1].(types.ImageBlock)
+	if !ok || existing.Source.AssetID != "asset_existing" {
+		t.Fatalf("edit input[1]=%#v", plan.Input[1])
+	}
+	added, ok := plan.Input[2].(types.ImageBlock)
+	if !ok || added.Source.AssetID != "asset_new" {
+		t.Fatalf("edit input[2]=%#v", plan.Input[2])
+	}
+}
+
 func awaitChatPageResources(h *vtest.Harness, m *vtest.Mounted) {
 	h.AwaitResource(m, "staticData")
 	h.AwaitResource(m, "conversations")
@@ -172,8 +248,39 @@ func (s *testChatPageStore) db() *neon.TestDB {
 			switch {
 			case strings.Contains(sql, "FROM app_orgs"):
 				return newChatTestRow("org_123", "Test Org", true, true, "oai-resp/gpt-5-mini")
-			case strings.Contains(sql, "FROM conversations") && strings.Contains(sql, "WHERE id = $1 AND org_id = $2"):
-				return newChatTestRow("conv_123", "Balance check", "oai-resp/gpt-5-mini", "platform_hosted", s.now)
+			case strings.Contains(sql, "FROM vai_sessions") && strings.Contains(sql, "external_session_id = $2"):
+				return newChatTestRow(
+					"sess_123",
+					"org_123",
+					"conv_123",
+					"user_123",
+					"app_user",
+					"",
+					`{}`,
+					s.now,
+					s.now,
+					"",
+				)
+			case strings.Contains(sql, "FROM vai_chains") && strings.Contains(sql, "WHERE id = $1"):
+				return newChatTestRow(
+					"chain_123",
+					"org_123",
+					"sess_123",
+					"conv_123",
+					"user_123",
+					"app_user",
+					"",
+					"idle",
+					1,
+					"",
+					"",
+					1,
+					0,
+					`{"model":"oai-resp/gpt-5-mini"}`,
+					`{}`,
+					s.now,
+					s.now,
+				)
 			case strings.Contains(sql, "FROM wallet_ledger"):
 				if s.balanceErr != nil {
 					return &neon.ErrRow{Err: s.balanceErr}
@@ -185,26 +292,65 @@ func (s *testChatPageStore) db() *neon.TestDB {
 		},
 		QueryFunc: func(_ context.Context, sql string, _ ...any) (pgx.Rows, error) {
 			switch {
-			case strings.Contains(sql, "FROM conversations") && strings.Contains(sql, "ORDER BY updated_at DESC"):
+			case strings.Contains(sql, "FROM vai_sessions") && strings.Contains(sql, "ORDER BY updated_at DESC"):
 				return newTestRows([]any{
+					"sess_123",
+					"org_123",
 					"conv_123",
-					"Balance check",
-					"oai-resp/gpt-5-mini",
-					services.KeySourcePlatformHosted,
+					"user_123",
+					"app_user",
+					"",
+					`{}`,
 					s.now,
+					s.now,
+					"chain_123",
 				}), nil
-			case strings.Contains(sql, "FROM conversation_messages"):
+			case strings.Contains(sql, "FROM vai_chains") && strings.Contains(sql, "WHERE session_id = $1"):
 				return newTestRows([]any{
-					"msg_123",
-					"user",
-					"Hello",
-					services.KeySourcePlatformHosted,
+					"chain_123",
+					"org_123",
+					"sess_123",
+					"conv_123",
+					"user_123",
+					"app_user",
+					"",
+					"idle",
+					1,
 					"",
 					"",
+					1,
+					0,
+					`{"model":"oai-resp/gpt-5-mini"}`,
+					`{}`,
+					s.now,
 					s.now,
 				}), nil
-			case strings.Contains(sql, "FROM attachments"):
-				return newTestRows(), nil
+			case strings.Contains(sql, "FROM vai_chain_messages") && strings.Contains(sql, "WHERE chain_id = $1"):
+				return newTestRows([]any{
+					"user",
+					`[{"type":"text","text":"Hello"}]`,
+				}), nil
+			case strings.Contains(sql, "FROM vai_runs") && strings.Contains(sql, "WHERE chain_id = $1"):
+				return newTestRows([]any{
+					"run_123",
+					"org_123",
+					"chain_123",
+					"sess_123",
+					"",
+					"",
+					"",
+					"openai",
+					"oai-resp/gpt-5-mini",
+					"completed",
+					"end_turn",
+					`{"model":"oai-resp/gpt-5-mini"}`,
+					`{"input_tokens":1,"output_tokens":1,"total_tokens":2}`,
+					`{"observability":{"key_source":"platform_hosted","transport":"sse"}}`,
+					1,
+					100,
+					s.now,
+					s.now,
+				}), nil
 			case strings.Contains(sql, "FROM provider_secrets"):
 				return newTestRows(), nil
 			default:

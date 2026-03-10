@@ -241,7 +241,7 @@ func (m *Manager) StartChain(ctx context.Context, principal Principal, env Runti
 		ActorID:                principal.ActorID,
 		Status:                 types.ChainStatusIdle,
 		ChainVersion:           1,
-		Defaults:               cloneJSON(payload.Defaults),
+		Defaults:               cloneChainDefaults(payload.Defaults),
 		Metadata:               cloneJSON(payload.Metadata),
 		MessageCountCached:     len(payload.History),
 		CreatedAt:              now,
@@ -457,7 +457,7 @@ func (m *Manager) UpdateChain(ctx context.Context, chainID string, env RuntimeEn
 			Type:         "chain.updated",
 			ChainID:      record.ID,
 			ChainVersion: record.ChainVersion,
-			Defaults:     cloneJSON(record.Defaults),
+			Defaults:     cloneChainDefaults(record.Defaults),
 		}, nil
 	}
 	chain.mu.Lock()
@@ -505,7 +505,7 @@ func (m *Manager) UpdateChain(ctx context.Context, chainID string, env RuntimeEn
 		EventID:      chain.nextEventID,
 		ChainVersion: chain.record.ChainVersion,
 		ChainID:      chain.record.ID,
-		Defaults:     cloneJSON(chain.record.Defaults),
+		Defaults:     cloneChainDefaults(chain.record.Defaults),
 	}
 	chain.mu.Unlock()
 	if attachmentID != "" {
@@ -573,6 +573,24 @@ func (m *Manager) GetSession(ctx context.Context, sessionID string) (*types.Sess
 	return m.store.GetSession(ctx, sessionID)
 }
 
+func (m *Manager) ListSessions(ctx context.Context, principal Principal) ([]types.SessionRecord, error) {
+	if authErr := authorizeOrgAccess(principal.OrgID, principal.OrgID); authErr != nil {
+		return nil, authErr
+	}
+	return m.store.ListSessions(ctx, principal.OrgID)
+}
+
+func (m *Manager) GetSessionAuthorized(ctx context.Context, principal Principal, sessionID string) (*types.SessionRecord, error) {
+	record, err := m.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if authErr := authorizeOrgAccess(record.OrgID, principal.OrgID); authErr != nil {
+		return nil, authErr.WithChain(record.LatestChainID)
+	}
+	return record, nil
+}
+
 func (m *Manager) ListSessionChains(ctx context.Context, sessionID string) ([]types.ChainRecord, error) {
 	chains, err := m.store.ListSessionChains(ctx, sessionID)
 	if err != nil {
@@ -595,6 +613,43 @@ func (m *Manager) ListSessionChains(ctx context.Context, sessionID string) ([]ty
 	return chains, nil
 }
 
+func (m *Manager) ListSessionChainsAuthorized(ctx context.Context, principal Principal, sessionID string) ([]types.ChainRecord, error) {
+	session, err := m.GetSessionAuthorized(ctx, principal, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return m.ListSessionChains(ctx, session.ID)
+}
+
+func (m *Manager) ListChains(ctx context.Context, principal Principal, sessionID string, unsessionedOnly bool) ([]types.ChainRecord, error) {
+	if authErr := authorizeOrgAccess(principal.OrgID, principal.OrgID); authErr != nil {
+		return nil, authErr
+	}
+	chains, err := m.store.ListChains(ctx, principal.OrgID, sessionID, unsessionedOnly)
+	if err != nil {
+		return nil, err
+	}
+	for i := range chains {
+		if hot := m.hotChain(chains[i].ID); hot != nil {
+			hot.mu.Lock()
+			chains[i].Status = hot.record.Status
+			chains[i].ChainVersion = hot.record.ChainVersion
+			chains[i].UpdatedAt = hot.record.UpdatedAt
+			chains[i].Defaults = cloneChainDefaults(hot.record.Defaults)
+			if hot.writer != nil {
+				chains[i].ActiveAttachment = &types.ActiveAttachmentInfo{
+					Mode:      hot.writer.Mode,
+					StartedAt: hot.writer.StartedAt,
+				}
+			} else {
+				chains[i].ActiveAttachment = nil
+			}
+			hot.mu.Unlock()
+		}
+	}
+	return chains, nil
+}
+
 func (m *Manager) GetChain(ctx context.Context, chainID string) (*types.ChainRecord, error) {
 	record, _, err := m.store.GetChain(ctx, chainID)
 	if err != nil {
@@ -605,7 +660,7 @@ func (m *Manager) GetChain(ctx context.Context, chainID string) (*types.ChainRec
 		record.Status = hot.record.Status
 		record.ChainVersion = hot.record.ChainVersion
 		record.UpdatedAt = hot.record.UpdatedAt
-		record.Defaults = cloneJSON(hot.record.Defaults)
+		record.Defaults = cloneChainDefaults(hot.record.Defaults)
 		if hot.writer != nil {
 			record.ActiveAttachment = &types.ActiveAttachmentInfo{
 				Mode:      hot.writer.Mode,
@@ -615,6 +670,17 @@ func (m *Manager) GetChain(ctx context.Context, chainID string) (*types.ChainRec
 			record.ActiveAttachment = nil
 		}
 		hot.mu.Unlock()
+	}
+	return record, nil
+}
+
+func (m *Manager) GetChainAuthorized(ctx context.Context, principal Principal, chainID string) (*types.ChainRecord, error) {
+	record, err := m.GetChain(ctx, chainID)
+	if err != nil {
+		return nil, err
+	}
+	if authErr := authorizeOrgAccess(record.OrgID, principal.OrgID); authErr != nil {
+		return nil, authErr.WithChain(chainID)
 	}
 	return record, nil
 }
@@ -641,12 +707,43 @@ func (m *Manager) GetChainContext(ctx context.Context, chainID string) (*types.C
 	}, nil
 }
 
+func (m *Manager) GetChainContextAuthorized(ctx context.Context, principal Principal, chainID string) (*types.ChainContextResponse, error) {
+	record, err := m.GetChainAuthorized(ctx, principal, chainID)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := m.GetChainContext(ctx, chainID)
+	if err != nil {
+		return nil, err
+	}
+	resp.ChainID = record.ID
+	return resp, nil
+}
+
 func (m *Manager) ListRuns(ctx context.Context, chainID string) ([]types.ChainRunRecord, error) {
 	return m.store.ListChainRuns(ctx, chainID)
 }
 
+func (m *Manager) ListRunsAuthorized(ctx context.Context, principal Principal, chainID string) ([]types.ChainRunRecord, error) {
+	if _, err := m.GetChainAuthorized(ctx, principal, chainID); err != nil {
+		return nil, err
+	}
+	return m.ListRuns(ctx, chainID)
+}
+
 func (m *Manager) GetRun(ctx context.Context, runID string) (*types.ChainRunRecord, error) {
 	return m.store.GetRun(ctx, runID)
+}
+
+func (m *Manager) GetRunAuthorized(ctx context.Context, principal Principal, runID string) (*types.ChainRunRecord, error) {
+	run, err := m.store.GetRun(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	if authErr := authorizeOrgAccess(run.OrgID, principal.OrgID); authErr != nil {
+		return nil, authErr.WithChain(run.ChainID).WithRun(run.ID)
+	}
+	return run, nil
 }
 
 func (m *Manager) GetRunTimeline(ctx context.Context, runID string) (*types.RunTimelineResponse, error) {
@@ -657,8 +754,34 @@ func (m *Manager) GetRunTimeline(ctx context.Context, runID string) (*types.RunT
 	return &types.RunTimelineResponse{RunID: runID, Items: items}, nil
 }
 
+func (m *Manager) GetRunTimelineAuthorized(ctx context.Context, principal Principal, runID string) (*types.RunTimelineResponse, error) {
+	run, err := m.GetRunAuthorized(ctx, principal, runID)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := m.GetRunTimeline(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	resp.RunID = run.ID
+	return resp, nil
+}
+
 func (m *Manager) GetEffectiveRequest(ctx context.Context, runID string) (*types.EffectiveRequestResponse, error) {
 	return m.store.GetEffectiveRequest(ctx, runID)
+}
+
+func (m *Manager) GetEffectiveRequestAuthorized(ctx context.Context, principal Principal, runID string) (*types.EffectiveRequestResponse, error) {
+	run, err := m.GetRunAuthorized(ctx, principal, runID)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := m.GetEffectiveRequest(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	resp.RunID = run.ID
+	return resp, nil
 }
 
 func (m *Manager) OwnsAttachment(ctx context.Context, chainID, attachmentID string) bool {
@@ -741,7 +864,7 @@ func (m *Manager) buildStartedEvent(_ context.Context, chain *hotChain, scope Cr
 		ActorID:                chain.actorID,
 		AuthorizedProviders:    scope.AuthorizedProviders(),
 		AuthorizedGatewayTools: scope.AuthorizedGatewayTools(),
-		Defaults:               cloneJSON(chain.record.Defaults),
+		Defaults:               cloneChainDefaults(chain.record.Defaults),
 	}
 }
 
@@ -770,8 +893,15 @@ func (m *Manager) authorizeChainMutation(chain *hotChain, principal Principal) *
 	if chain != nil && chain.record != nil {
 		chainID = chain.record.ID
 	}
-	if strings.TrimSpace(principal.OrgID) == "" || strings.TrimSpace(chain.orgID) == "" || strings.TrimSpace(principal.OrgID) != strings.TrimSpace(chain.orgID) {
-		return types.NewCanonicalError(types.ErrorCodeAuthChainAccessDenied, "principal is not authorized for this chain").WithChain(chainID)
+	if authErr := authorizeOrgAccess(chain.orgID, principal.OrgID); authErr != nil {
+		return authErr.WithChain(chainID)
+	}
+	return nil
+}
+
+func authorizeOrgAccess(resourceOrgID, callerOrgID string) *types.CanonicalError {
+	if strings.TrimSpace(callerOrgID) == "" || strings.TrimSpace(resourceOrgID) == "" || strings.TrimSpace(callerOrgID) != strings.TrimSpace(resourceOrgID) {
+		return types.NewCanonicalError(types.ErrorCodeAuthChainAccessDenied, "principal is not authorized for this chain")
 	}
 	return nil
 }
@@ -848,7 +978,7 @@ func mergeDefaults(current, patch types.ChainDefaults) types.ChainDefaults {
 		current.Model = patch.Model
 	}
 	if patch.System != nil {
-		current.System = patch.System
+		current.System = normalizedMessageContent(patch.System)
 	}
 	if patch.Tools != nil {
 		current.Tools = cloneJSON(patch.Tools)

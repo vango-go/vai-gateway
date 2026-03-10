@@ -183,6 +183,94 @@ func TestBuildRequest_AddsSyntheticMessageForMultimodalToolResult(t *testing.T) 
 	}
 }
 
+func TestBuildRequest_EmptyToolResultStillSerializesOutputField(t *testing.T) {
+	p := &Provider{}
+	req := &types.MessageRequest{
+		Model: "gpt-5-mini",
+		Messages: []types.Message{
+			{
+				Role: "assistant",
+				Content: []types.ContentBlock{
+					types.ToolUseBlock{
+						Type:  "tool_use",
+						ID:    "call_1",
+						Name:  "lookup",
+						Input: map[string]any{"q": "x"},
+					},
+				},
+			},
+			{
+				Role: "user",
+				Content: []types.ContentBlock{
+					types.ToolResultBlock{
+						Type:      "tool_result",
+						ToolUseID: "call_1",
+						Content: []types.ContentBlock{
+							types.TextBlock{Type: "text", Text: ""},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	translated := p.buildRequest(req)
+	payload, err := json.Marshal(translated)
+	if err != nil {
+		t.Fatalf("marshal translated request: %v", err)
+	}
+
+	var decoded struct {
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("decode translated payload: %v", err)
+	}
+	if len(decoded.Input) != 2 {
+		t.Fatalf("input len = %d, want 2", len(decoded.Input))
+	}
+	if _, ok := decoded.Input[1]["output"]; !ok {
+		t.Fatalf("function_call_output payload = %#v, want explicit output field", decoded.Input[1])
+	}
+	if output, _ := decoded.Input[1]["output"].(string); output != "" {
+		t.Fatalf("output = %q, want empty string", output)
+	}
+}
+
+func TestBuildRequest_DoesNotSerializeOutputOnRegularMessages(t *testing.T) {
+	p := &Provider{}
+	req := &types.MessageRequest{
+		Model: "gpt-5-mini",
+		Messages: []types.Message{
+			{
+				Role: "user",
+				Content: []types.ContentBlock{
+					types.TextBlock{Type: "text", Text: "hello"},
+				},
+			},
+		},
+	}
+
+	translated := p.buildRequest(req)
+	payload, err := json.Marshal(translated)
+	if err != nil {
+		t.Fatalf("marshal translated request: %v", err)
+	}
+
+	var decoded struct {
+		Input []map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatalf("decode translated payload: %v", err)
+	}
+	if len(decoded.Input) != 1 {
+		t.Fatalf("input len = %d, want 1", len(decoded.Input))
+	}
+	if _, ok := decoded.Input[0]["output"]; ok {
+		t.Fatalf("message payload = %#v, did not expect output field", decoded.Input[0])
+	}
+}
+
 func TestParseResponse_MapsOutputItemsAndUsageMetadata(t *testing.T) {
 	p := &Provider{}
 	body := []byte(`{

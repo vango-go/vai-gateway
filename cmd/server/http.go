@@ -445,8 +445,10 @@ func (s *betaServer) rawGatewayProxy() http.Handler {
 		}
 
 		var body []byte
-		logged := isLoggedGatewayEndpoint(r.URL.Path)
-		if r.Method == http.MethodPost && logged {
+		singleRequestLogged := isSingleRequestLoggedEndpoint(r.URL.Path)
+		managedRunObserved := isManagedRunObservedEndpoint(r.URL.Path)
+		observedRequest := singleRequestLogged || managedRunObserved
+		if r.Method == http.MethodPost && observedRequest {
 			body, err = io.ReadAll(r.Body)
 			if err != nil {
 				writeGatewayError(w, http.StatusBadRequest, "invalid request body")
@@ -467,7 +469,7 @@ func (s *betaServer) rawGatewayProxy() http.Handler {
 		var requestID string
 		var startedAt time.Time
 		keySource := inferredGatewayKeySource(r.Header)
-		if logged {
+		if observedRequest {
 			startedAt = time.Now().UTC()
 			requestID = ensureGatewayRequestID(r.Header)
 			observed, err = parseObservedGatewayRequest(r, body, requestID)
@@ -501,33 +503,33 @@ func (s *betaServer) rawGatewayProxy() http.Handler {
 		resolvedHeaders, keySource, err := s.services.ResolveExecutionHeaders(r.Context(), validated.Organization.ID, r.Header, "", services.AccessCredentialGatewayAPIKey)
 		if err != nil {
 			writeGatewayError(w, http.StatusBadRequest, err.Error())
-			s.recordGatewayObservation(r.Context(), validated, prepared, observed, &observedGatewayCompletion{
+			s.recordObservedGatewayOutcome(r.Context(), validated, prepared, observed, &observedGatewayCompletion{
 				StatusCode:      http.StatusBadRequest,
 				ResponseBody:    mustJSONText(map[string]any{"error": map[string]any{"message": strings.TrimSpace(err.Error())}}),
 				ResponseSummary: mustJSONText(map[string]any{"status_code": http.StatusBadRequest, "error": strings.TrimSpace(err.Error())}),
 				ErrorSummary:    strings.TrimSpace(err.Error()),
 				ErrorJSON:       mustJSONText(map[string]any{"message": strings.TrimSpace(err.Error())}),
-			}, keySource, startedAt)
+			}, keySource, startedAt, singleRequestLogged, managedRunObserved)
 			return
 		}
-		if keySource == services.KeySourcePlatformHosted && logged {
+		if keySource == services.KeySourcePlatformHosted && observedRequest {
 			model := extractGatewayModel(r.URL.Path, body)
 			if err := s.services.ReservePlatformHostedUsage(r.Context(), validated.Organization.ID, model); err != nil {
 				writeGatewayError(w, http.StatusPaymentRequired, err.Error())
-				s.recordGatewayObservation(r.Context(), validated, prepared, observed, &observedGatewayCompletion{
+				s.recordObservedGatewayOutcome(r.Context(), validated, prepared, observed, &observedGatewayCompletion{
 					StatusCode:      http.StatusPaymentRequired,
 					ResponseBody:    mustJSONText(map[string]any{"error": map[string]any{"message": strings.TrimSpace(err.Error())}}),
 					ResponseSummary: mustJSONText(map[string]any{"status_code": http.StatusPaymentRequired, "error": strings.TrimSpace(err.Error())}),
 					ErrorSummary:    strings.TrimSpace(err.Error()),
 					ErrorJSON:       mustJSONText(map[string]any{"message": strings.TrimSpace(err.Error())}),
-				}, keySource, startedAt)
+				}, keySource, startedAt, singleRequestLogged, managedRunObserved)
 				return
 			}
 		}
 
 		req := r.Clone(r.Context())
 		req.Header = cloneForForward(resolvedHeaders)
-		if logged {
+		if observedRequest {
 			req.Header.Set(headerRequestID, requestID)
 			if prepared != nil && strings.TrimSpace(prepared.SessionID) != "" {
 				req.Header.Set(headerSessionID, prepared.SessionID)
@@ -538,7 +540,7 @@ func (s *betaServer) rawGatewayProxy() http.Handler {
 			req.ContentLength = int64(len(body))
 		}
 
-		if !logged {
+		if !observedRequest {
 			s.gateway.ServeHTTP(w, req)
 			return
 		}
@@ -558,13 +560,22 @@ func (s *betaServer) rawGatewayProxy() http.Handler {
 				ErrorJSON:       mustJSONText(map[string]any{"message": completionErr.Error()}),
 			}
 		}
-		s.recordGatewayObservation(r.Context(), validated, prepared, observed, completion, keySource, startedAt)
+		s.recordObservedGatewayOutcome(r.Context(), validated, prepared, observed, completion, keySource, startedAt, singleRequestLogged, managedRunObserved)
 	})
 }
 
-func isLoggedGatewayEndpoint(path string) bool {
+func isSingleRequestLoggedEndpoint(path string) bool {
 	switch path {
-	case "/v1/messages", "/v1/runs", "/v1/runs:stream":
+	case "/v1/messages":
+		return true
+	default:
+		return false
+	}
+}
+
+func isManagedRunObservedEndpoint(path string) bool {
+	switch path {
+	case "/v1/runs", "/v1/runs:stream":
 		return true
 	default:
 		return false
@@ -603,6 +614,26 @@ func setGatewayObservationHeaders(headers http.Header, prepared *services.Prepar
 	headers.Set(headerChainID, prepared.ChainID)
 	if strings.TrimSpace(prepared.ParentRequestID) != "" {
 		headers.Set(headerParentRequestID, prepared.ParentRequestID)
+	}
+}
+
+func (s *betaServer) recordObservedGatewayOutcome(
+	ctx context.Context,
+	validated *services.ValidatedGatewayAPIKey,
+	prepared *services.PreparedGatewayObservation,
+	observed *observedGatewayRequest,
+	completion *observedGatewayCompletion,
+	keySource services.KeySource,
+	startedAt time.Time,
+	singleRequestLogged bool,
+	managedRunObserved bool,
+) {
+	if singleRequestLogged {
+		s.recordGatewayObservation(ctx, validated, prepared, observed, completion, keySource, startedAt)
+		return
+	}
+	if managedRunObserved {
+		s.recordManagedGatewayRunObservation(ctx, validated, prepared, observed, completion, keySource, startedAt)
 	}
 }
 
@@ -655,6 +686,53 @@ func (s *betaServer) recordGatewayObservation(
 		RunTrace:                 completion.RunTrace,
 	}); err != nil {
 		s.logger.Error("record gateway observation failed", "request_id", prepared.RequestID, "error", err)
+		return
+	}
+	s.recordObservedGatewayUsage(ctx, validated.Organization.ID, observed, completion, keySource)
+}
+
+func (s *betaServer) recordManagedGatewayRunObservation(
+	ctx context.Context,
+	validated *services.ValidatedGatewayAPIKey,
+	prepared *services.PreparedGatewayObservation,
+	observed *observedGatewayRequest,
+	completion *observedGatewayCompletion,
+	keySource services.KeySource,
+	startedAt time.Time,
+) {
+	if validated == nil || prepared == nil || observed == nil || completion == nil {
+		return
+	}
+	completedAt := time.Now().UTC()
+	if completion.DurationMS == 0 {
+		completion.DurationMS = completedAt.Sub(startedAt).Milliseconds()
+	}
+	if err := s.services.ProjectGatewayRunObservation(ctx, services.GatewayManagedRunProjectionInput{
+		RequestID:                prepared.RequestID,
+		OrgID:                    validated.Organization.ID,
+		ChainID:                  prepared.ChainID,
+		ExternalSessionID:        prepared.SessionID,
+		ParentRequestID:          prepared.ParentRequestID,
+		GatewayAPIKeyID:          validated.APIKeyID,
+		GatewayAPIKeyName:        validated.APIKeyName,
+		GatewayAPIKeyPrefix:      validated.TokenPrefix,
+		EndpointKind:             observed.EndpointKind,
+		EndpointFamily:           observed.EndpointFamily,
+		Provider:                 observed.Provider,
+		Model:                    observed.Model,
+		KeySource:                keySource,
+		AccessCredential:         services.AccessCredentialGatewayAPIKey,
+		System:                   observed.System,
+		Messages:                 observed.Messages,
+		RunConfig:                observed.RunConfig,
+		RunResult:                completion.RunResult,
+		ErrorSummary:             completion.ErrorSummary,
+		InputContextFingerprint:  observed.InputContextFingerprint,
+		OutputContextFingerprint: completion.OutputContextFingerprint,
+		StartedAt:                startedAt,
+		CompletedAt:              completedAt,
+	}); err != nil {
+		s.logger.Error("project managed gateway run failed", "request_id", prepared.RequestID, "error", err)
 		return
 	}
 	s.recordObservedGatewayUsage(ctx, validated.Organization.ID, observed, completion, keySource)
@@ -1063,6 +1141,9 @@ func cloneForForward(in http.Header) http.Header {
 	for key, vals := range in {
 		out[key] = append([]string(nil), vals...)
 	}
+	out.Del("X-VAI-Internal-Org-ID")
+	out.Del("X-VAI-Internal-Principal-ID")
+	out.Del("X-VAI-Internal-Principal-Type")
 	return out
 }
 

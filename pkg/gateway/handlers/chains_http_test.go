@@ -116,6 +116,190 @@ func TestChainsHandler_CreateRunAndReadHistory(t *testing.T) {
 	}
 }
 
+func TestChainsHandler_ForkCreatesNewChainWithInheritedSession(t *testing.T) {
+	h := ChainsHandler{
+		Config:     baseRunsConfig(),
+		Upstreams:  fakeFactory{p: &fakeRunProvider{streamEvents: chainTestStreamEvents("ok")}},
+		HTTPClient: http.DefaultClient,
+		Chains:     chainrt.NewManager(nil, chainrt.DefaultManagerConfig()),
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/chains", bytes.NewReader([]byte(`{
+		"external_session_id":"sess_ext_fork",
+		"defaults":{"model":"anthropic/test"},
+		"history":[
+			{"role":"user","content":[{"type":"text","text":"hello"}]},
+			{"role":"assistant","content":[{"type":"text","text":"hi"}]}
+		]
+	}`)))
+	createReq.Header.Set(idempotencyKeyHeader, "chain_create_fork")
+	createReq.Header.Set("X-Provider-Key-Anthropic", "sk-test")
+	createRR := httptest.NewRecorder()
+	h.ServeHTTP(createRR, createReq)
+	if createRR.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", createRR.Code, createRR.Body.String())
+	}
+	var started types.ChainStartedEvent
+	if err := json.Unmarshal(createRR.Body.Bytes(), &started); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	forkReq := httptest.NewRequest(http.MethodPost, "/v1/chains/"+started.ChainID+":fork", bytes.NewReader([]byte(`{
+		"history":[
+			{"role":"user","content":[{"type":"text","text":"edited hello"}]}
+		]
+	}`)))
+	forkReq.Header.Set(idempotencyKeyHeader, "chain_fork_test")
+	forkReq.Header.Set("X-Provider-Key-Anthropic", "sk-test")
+	forkRR := httptest.NewRecorder()
+	h.ServeHTTP(forkRR, forkReq)
+	if forkRR.Code != http.StatusOK {
+		t.Fatalf("fork status=%d body=%s", forkRR.Code, forkRR.Body.String())
+	}
+	var forked types.ChainForkResponse
+	if err := json.Unmarshal(forkRR.Body.Bytes(), &forked); err != nil {
+		t.Fatalf("decode fork response: %v", err)
+	}
+	if forked.ChainID == "" || forked.ChainID == started.ChainID {
+		t.Fatalf("unexpected forked chain id: %+v", forked)
+	}
+	if forked.ParentChainID != started.ChainID {
+		t.Fatalf("parent_chain_id=%q, want %q", forked.ParentChainID, started.ChainID)
+	}
+	if forked.SessionID != started.SessionID {
+		t.Fatalf("session_id=%q, want %q", forked.SessionID, started.SessionID)
+	}
+	if forked.ResumeToken == "" {
+		t.Fatalf("expected resume token in fork response: %+v", forked)
+	}
+
+	contextReq := httptest.NewRequest(http.MethodGet, "/v1/chains/"+forked.ChainID+"/context", nil)
+	contextRR := httptest.NewRecorder()
+	h.ServeHTTP(contextRR, contextReq)
+	if contextRR.Code != http.StatusOK {
+		t.Fatalf("fork context status=%d body=%s", contextRR.Code, contextRR.Body.String())
+	}
+	var contextResp types.ChainContextResponse
+	if err := json.Unmarshal(contextRR.Body.Bytes(), &contextResp); err != nil {
+		t.Fatalf("decode context response: %v", err)
+	}
+	if len(contextResp.Messages) != 1 {
+		t.Fatalf("len(messages)=%d, want 1", len(contextResp.Messages))
+	}
+	if got := contextResp.Messages[0].ContentBlocks()[0].(types.TextBlock).Text; got != "edited hello" {
+		t.Fatalf("forked history text=%q", got)
+	}
+}
+
+func TestChainRunsReadHandler_RegenerateCreatesForkAndFirstRunTracksRerunOfRunID(t *testing.T) {
+	h := ChainsHandler{
+		Config:     baseRunsConfig(),
+		Upstreams:  fakeFactory{p: &fakeRunProvider{streamEvents: chainTestStreamEvents("ok")}},
+		HTTPClient: http.DefaultClient,
+		Chains:     chainrt.NewManager(nil, chainrt.DefaultManagerConfig()),
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/chains", bytes.NewReader([]byte(`{
+		"external_session_id":"sess_ext_regen",
+		"defaults":{"model":"anthropic/test"},
+		"history":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`)))
+	createReq.Header.Set(idempotencyKeyHeader, "chain_create_regen")
+	createReq.Header.Set("X-Provider-Key-Anthropic", "sk-test")
+	createRR := httptest.NewRecorder()
+	h.ServeHTTP(createRR, createReq)
+	if createRR.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", createRR.Code, createRR.Body.String())
+	}
+	var started types.ChainStartedEvent
+	if err := json.Unmarshal(createRR.Body.Bytes(), &started); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	runReq := httptest.NewRequest(http.MethodPost, "/v1/chains/"+started.ChainID+"/runs", bytes.NewReader([]byte(`{
+		"input":[{"role":"user","content":[{"type":"text","text":"say hi"}]}]
+	}`)))
+	runReq.Header.Set(idempotencyKeyHeader, "chain_run_regen")
+	runReq.Header.Set("X-Provider-Key-Anthropic", "sk-test")
+	runRR := httptest.NewRecorder()
+	h.ServeHTTP(runRR, runReq)
+	if runRR.Code != http.StatusOK {
+		t.Fatalf("run status=%d body=%s", runRR.Code, runRR.Body.String())
+	}
+	var runEnvelope struct {
+		Run *types.ChainRunRecord `json:"run"`
+	}
+	if err := json.Unmarshal(runRR.Body.Bytes(), &runEnvelope); err != nil {
+		t.Fatalf("decode run response: %v", err)
+	}
+	if runEnvelope.Run == nil || runEnvelope.Run.ID == "" {
+		t.Fatalf("run envelope=%+v", runEnvelope)
+	}
+
+	readHandler := ChainRunsReadHandler{Config: baseRunsConfig(), Chains: h.Chains}
+	regenReq := httptest.NewRequest(http.MethodPost, "/v1/runs/"+runEnvelope.Run.ID+":regenerate", bytes.NewReader([]byte(`{}`)))
+	regenReq.Header.Set(idempotencyKeyHeader, "run_regenerate_test")
+	regenReq.Header.Set("X-Provider-Key-Anthropic", "sk-test")
+	regenRR := httptest.NewRecorder()
+	readHandler.ServeHTTP(regenRR, regenReq)
+	if regenRR.Code != http.StatusOK {
+		t.Fatalf("regenerate status=%d body=%s", regenRR.Code, regenRR.Body.String())
+	}
+	var regenerated types.ChainForkResponse
+	if err := json.Unmarshal(regenRR.Body.Bytes(), &regenerated); err != nil {
+		t.Fatalf("decode regenerate response: %v", err)
+	}
+	if regenerated.ChainID == "" || regenerated.ChainID == started.ChainID {
+		t.Fatalf("unexpected regenerated chain id: %+v", regenerated)
+	}
+	if regenerated.ForkedFromRunID != runEnvelope.Run.ID {
+		t.Fatalf("forked_from_run_id=%q, want %q", regenerated.ForkedFromRunID, runEnvelope.Run.ID)
+	}
+	if len(regenerated.Input) != 1 {
+		t.Fatalf("len(input)=%d, want 1", len(regenerated.Input))
+	}
+	if got := regenerated.Input[0].ContentBlocks()[0].(types.TextBlock).Text; got != "say hi" {
+		t.Fatalf("regenerated input text=%q", got)
+	}
+
+	contextReq := httptest.NewRequest(http.MethodGet, "/v1/chains/"+regenerated.ChainID+"/context", nil)
+	contextRR := httptest.NewRecorder()
+	h.ServeHTTP(contextRR, contextReq)
+	if contextRR.Code != http.StatusOK {
+		t.Fatalf("context status=%d body=%s", contextRR.Code, contextRR.Body.String())
+	}
+	var contextResp types.ChainContextResponse
+	if err := json.Unmarshal(contextRR.Body.Bytes(), &contextResp); err != nil {
+		t.Fatalf("decode context response: %v", err)
+	}
+	if len(contextResp.Messages) != 1 {
+		t.Fatalf("len(history)=%d, want 1", len(contextResp.Messages))
+	}
+	if got := contextResp.Messages[0].ContentBlocks()[0].(types.TextBlock).Text; got != "hello" {
+		t.Fatalf("history[0]=%q", got)
+	}
+
+	reRunReq := httptest.NewRequest(http.MethodPost, "/v1/chains/"+regenerated.ChainID+"/runs", bytes.NewReader([]byte(`{
+		"input":[{"role":"user","content":[{"type":"text","text":"say hi"}]}]
+	}`)))
+	reRunReq.Header.Set(idempotencyKeyHeader, "chain_run_regen_fork")
+	reRunReq.Header.Set("X-Provider-Key-Anthropic", "sk-test")
+	reRunRR := httptest.NewRecorder()
+	h.ServeHTTP(reRunRR, reRunReq)
+	if reRunRR.Code != http.StatusOK {
+		t.Fatalf("rerun status=%d body=%s", reRunRR.Code, reRunRR.Body.String())
+	}
+	var reRunEnvelope struct {
+		Run *types.ChainRunRecord `json:"run"`
+	}
+	if err := json.Unmarshal(reRunRR.Body.Bytes(), &reRunEnvelope); err != nil {
+		t.Fatalf("decode rerun response: %v", err)
+	}
+	if reRunEnvelope.Run == nil || reRunEnvelope.Run.RerunOfRunID != runEnvelope.Run.ID {
+		t.Fatalf("rerun_of_run_id=%q, want %q", reRunEnvelope.Run.RerunOfRunID, runEnvelope.Run.ID)
+	}
+}
+
 func TestChainWSHandler_AllowsSequentialRunsOnOneSocket(t *testing.T) {
 	h := ChainWSHandler{
 		Config:     configForChainWS(),
@@ -279,6 +463,110 @@ func TestChainWSHandler_AttachRejectsCrossOrgEvenWithResumeToken(t *testing.T) {
 	errEvent := mustReadChainEvent(t, conn2).(types.ChainErrorEvent)
 	if errEvent.Code != types.ErrorCodeAuthResumeTokenInvalid {
 		t.Fatalf("code=%q, want %q", errEvent.Code, types.ErrorCodeAuthResumeTokenInvalid)
+	}
+}
+
+func TestHistoryReadEndpoints_AreOrgScoped(t *testing.T) {
+	const (
+		ownerKey    = "vai_sk_owner_history"
+		attackerKey = "vai_sk_attacker_history"
+	)
+
+	cfg := configForChainWS()
+	cfg.AuthMode = config.AuthModeRequired
+	cfg.APIKeys = map[string]struct{}{
+		ownerKey:    {},
+		attackerKey: {},
+	}
+	chainsHandler := ChainsHandler{
+		Config:     cfg,
+		Upstreams:  fakeFactory{p: &fakeRunProvider{streamEvents: chainTestStreamEvents("ok")}},
+		HTTPClient: http.DefaultClient,
+		Chains:     chainrt.NewManager(nil, chainrt.DefaultManagerConfig()),
+	}
+	sessionsHandler := SessionsHandler{Config: cfg, Chains: chainsHandler.Chains}
+
+	mux := http.NewServeMux()
+	mux.Handle("/v1/chains", mw.Auth(cfg, chainsHandler))
+	mux.Handle("/v1/chains/", mw.Auth(cfg, chainsHandler))
+	mux.Handle("/v1/sessions", mw.Auth(cfg, sessionsHandler))
+	mux.Handle("/v1/sessions/", mw.Auth(cfg, sessionsHandler))
+	createReq := httptest.NewRequest(http.MethodPost, "/v1/chains", bytes.NewReader([]byte(`{
+		"external_session_id":"sess_ext_history_scope",
+		"defaults":{"model":"anthropic/test"},
+		"history":[{"role":"user","content":[{"type":"text","text":"hello"}]}]
+	}`)))
+	createReq.Header.Set("Authorization", "Bearer "+ownerKey)
+	createReq.Header.Set(idempotencyKeyHeader, "chain_create_history_scope")
+	createReq.Header.Set("X-Provider-Key-Anthropic", "sk-test")
+	createRR := httptest.NewRecorder()
+	mw.Auth(cfg, chainsHandler).ServeHTTP(createRR, createReq)
+	if createRR.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", createRR.Code, createRR.Body.String())
+	}
+	var started types.ChainStartedEvent
+	if err := json.Unmarshal(createRR.Body.Bytes(), &started); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+
+	listChainsReq := httptest.NewRequest(http.MethodGet, "/v1/chains", nil)
+	listChainsReq.Header.Set("Authorization", "Bearer "+attackerKey)
+	listChainsRR := httptest.NewRecorder()
+	mw.Auth(cfg, chainsHandler).ServeHTTP(listChainsRR, listChainsReq)
+	if listChainsRR.Code != http.StatusOK {
+		t.Fatalf("attacker list chains status=%d body=%s", listChainsRR.Code, listChainsRR.Body.String())
+	}
+	var chainList types.ChainList
+	if err := json.Unmarshal(listChainsRR.Body.Bytes(), &chainList); err != nil {
+		t.Fatalf("decode chain list: %v", err)
+	}
+	if len(chainList.Items) != 0 {
+		t.Fatalf("attacker chain list leaked chains: %+v", chainList.Items)
+	}
+
+	getChainReq := httptest.NewRequest(http.MethodGet, "/v1/chains/"+started.ChainID, nil)
+	getChainReq.Header.Set("Authorization", "Bearer "+attackerKey)
+	getChainRR := httptest.NewRecorder()
+	mw.Auth(cfg, chainsHandler).ServeHTTP(getChainRR, getChainReq)
+	if getChainRR.Code != http.StatusForbidden {
+		t.Fatalf("attacker get chain status=%d body=%s", getChainRR.Code, getChainRR.Body.String())
+	}
+	var chainErr types.CanonicalErrorEnvelope
+	if err := json.Unmarshal(getChainRR.Body.Bytes(), &chainErr); err != nil {
+		t.Fatalf("decode chain error: %v", err)
+	}
+	if chainErr.Error == nil || chainErr.Error.Code != types.ErrorCodeAuthChainAccessDenied {
+		t.Fatalf("get chain code=%v, want %q", chainErr.Error, types.ErrorCodeAuthChainAccessDenied)
+	}
+
+	listSessionsReq := httptest.NewRequest(http.MethodGet, "/v1/sessions", nil)
+	listSessionsReq.Header.Set("Authorization", "Bearer "+attackerKey)
+	listSessionsRR := httptest.NewRecorder()
+	mw.Auth(cfg, sessionsHandler).ServeHTTP(listSessionsRR, listSessionsReq)
+	if listSessionsRR.Code != http.StatusOK {
+		t.Fatalf("attacker list sessions status=%d body=%s", listSessionsRR.Code, listSessionsRR.Body.String())
+	}
+	var sessions types.SessionList
+	if err := json.Unmarshal(listSessionsRR.Body.Bytes(), &sessions); err != nil {
+		t.Fatalf("decode session list: %v", err)
+	}
+	if len(sessions.Items) != 0 {
+		t.Fatalf("attacker session list leaked sessions: %+v", sessions.Items)
+	}
+
+	getSessionReq := httptest.NewRequest(http.MethodGet, "/v1/sessions/"+started.SessionID, nil)
+	getSessionReq.Header.Set("Authorization", "Bearer "+attackerKey)
+	getSessionRR := httptest.NewRecorder()
+	mw.Auth(cfg, sessionsHandler).ServeHTTP(getSessionRR, getSessionReq)
+	if getSessionRR.Code != http.StatusForbidden {
+		t.Fatalf("attacker get session status=%d body=%s", getSessionRR.Code, getSessionRR.Body.String())
+	}
+	var sessionErr types.CanonicalErrorEnvelope
+	if err := json.Unmarshal(getSessionRR.Body.Bytes(), &sessionErr); err != nil {
+		t.Fatalf("decode session error: %v", err)
+	}
+	if sessionErr.Error == nil || sessionErr.Error.Code != types.ErrorCodeAuthChainAccessDenied {
+		t.Fatalf("get session code=%v, want %q", sessionErr.Error, types.ErrorCodeAuthChainAccessDenied)
 	}
 }
 

@@ -453,6 +453,17 @@ func statusBadgeClass(statusCode int, hasError bool) string {
 }
 
 func observabilityDetailHref(filter services.GatewayRequestFilter, requestID string) string {
+	values := buildObservabilityQuery(filter)
+	values.Del("run_id")
+	values.Set("request_id", requestID)
+	encoded := values.Encode()
+	if encoded == "" {
+		return "/settings/observability"
+	}
+	return "/settings/observability?" + encoded
+}
+
+func buildObservabilityQuery(filter services.GatewayRequestFilter) url.Values {
 	values := url.Values{}
 	if filter.EndpointKind != "" {
 		values.Set("endpoint_kind", filter.EndpointKind)
@@ -475,12 +486,7 @@ func observabilityDetailHref(filter services.GatewayRequestFilter, requestID str
 	if filter.Hours > 0 {
 		values.Set("hours", fmt.Sprintf("%d", filter.Hours))
 	}
-	values.Set("request_id", requestID)
-	encoded := values.Encode()
-	if encoded == "" {
-		return "/settings/observability"
-	}
-	return "/settings/observability?" + encoded
+	return values
 }
 
 func selectedIf(ok bool) vango.Attr {

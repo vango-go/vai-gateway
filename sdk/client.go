@@ -40,6 +40,7 @@ type Client struct {
 	httpClient    *http.Client
 	baseURL       string
 	gatewayAPIKey string
+	extraHeaders  map[string]string
 }
 
 // NewClient creates a new client.
@@ -49,6 +50,7 @@ func NewClient(opts ...ClientOption) *Client {
 		providerKeys: make(map[string]string),
 		logger:       slog.Default(),
 		httpClient:   newDefaultHTTPClient(),
+		extraHeaders: make(map[string]string),
 	}
 	for _, opt := range opts {
 		opt(c)

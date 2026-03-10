@@ -15,7 +15,29 @@ import (
 	"github.com/vango-go/vai-lite/pkg/gateway/tools/servertools"
 )
 
+const (
+	headerInternalOrgID         = "X-VAI-Internal-Org-ID"
+	headerInternalPrincipalID   = "X-VAI-Internal-Principal-ID"
+	headerInternalPrincipalType = "X-VAI-Internal-Principal-Type"
+)
+
 func chainPrincipalFromRequest(r *http.Request, cfg config.Config) chainrt.Principal {
+	if internalOrgID := strings.TrimSpace(r.Header.Get(headerInternalOrgID)); internalOrgID != "" {
+		internalPrincipalID := strings.TrimSpace(r.Header.Get(headerInternalPrincipalID))
+		if internalPrincipalID == "" {
+			internalPrincipalID = internalOrgID
+		}
+		internalPrincipalType := strings.TrimSpace(r.Header.Get(headerInternalPrincipalType))
+		if internalPrincipalType == "" {
+			internalPrincipalType = "app_session"
+		}
+		return chainrt.Principal{
+			OrgID:         internalOrgID,
+			PrincipalID:   internalPrincipalID,
+			PrincipalType: internalPrincipalType,
+			ActorID:       strings.TrimSpace(r.Header.Get("X-VAI-Actor-ID")),
+		}
+	}
 	resolved := principal.Resolve(r, cfg)
 	principalID := resolved.Key
 	if principalID == "" {

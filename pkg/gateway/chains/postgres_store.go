@@ -112,6 +112,44 @@ WHERE id = $1`, sessionID))
 	return record, nil
 }
 
+func (s *PostgresStore) ListSessions(ctx context.Context, orgID string) ([]types.SessionRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("postgres store is not configured")
+	}
+	rows, err := s.db.Query(ctx, `
+SELECT
+	id,
+	org_id,
+	COALESCE(external_session_id, ''),
+	created_by_principal_id,
+	created_by_principal_type,
+	COALESCE(actor_id, ''),
+	metadata_json,
+	created_at,
+	updated_at,
+	COALESCE(latest_chain_id, '')
+FROM `+tableSessions+`
+WHERE org_id = $1
+ORDER BY updated_at DESC, created_at DESC`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]types.SessionRecord, 0)
+	for rows.Next() {
+		record, scanErr := scanSessionFromRows(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, *record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *PostgresStore) GetSessionByExternal(ctx context.Context, orgID, externalSessionID string) (*types.SessionRecord, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("postgres store is not configured")
@@ -411,6 +449,116 @@ ORDER BY sequence_in_chain ASC, created_at ASC`, chainID)
 		return nil, nil, err
 	}
 	return record, messages, nil
+}
+
+func (s *PostgresStore) ListChains(ctx context.Context, orgID, sessionID string, unsessionedOnly bool) ([]types.ChainRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("postgres store is not configured")
+	}
+	query := `
+SELECT
+	id,
+	org_id,
+	COALESCE(session_id, ''),
+	COALESCE(external_session_id, ''),
+	created_by_principal_id,
+	created_by_principal_type,
+	COALESCE(actor_id, ''),
+	status,
+	chain_version,
+	COALESCE(parent_chain_id, ''),
+	COALESCE(forked_from_run_id, ''),
+	message_count_cached,
+	token_estimate_cached,
+	current_defaults_json,
+	metadata_json,
+	created_at,
+	updated_at
+FROM ` + tableChains + `
+WHERE org_id = $1`
+	args := []any{orgID}
+	if sessionID != "" {
+		query += ` AND session_id = $2`
+		args = append(args, sessionID)
+	} else if unsessionedOnly {
+		query += ` AND session_id IS NULL`
+	}
+	query += `
+ORDER BY updated_at DESC, created_at DESC`
+	rows, err := s.db.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]types.ChainRecord, 0)
+	for rows.Next() {
+		record, scanErr := scanChainFromRows(rows)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		out = append(out, *record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (s *PostgresStore) ListChainMessages(ctx context.Context, chainID string) ([]types.ChainMessageRecord, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("postgres store is not configured")
+	}
+	rows, err := s.db.Query(ctx, `
+SELECT
+	id,
+	chain_id,
+	COALESCE(run_id, ''),
+	role,
+	sequence_in_chain,
+	content_json,
+	created_at
+FROM `+tableChainMessages+`
+WHERE chain_id = $1
+ORDER BY sequence_in_chain ASC, created_at ASC`, chainID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]types.ChainMessageRecord, 0)
+	for rows.Next() {
+		var (
+			record types.ChainMessageRecord
+			raw    []byte
+		)
+		if err := rows.Scan(
+			&record.ID,
+			&record.ChainID,
+			&record.RunID,
+			&record.Role,
+			&record.SequenceInChain,
+			&raw,
+			&record.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		content, err := decodeMessageContent(raw)
+		if err != nil {
+			return nil, err
+		}
+		record.Content = content
+		out = append(out, record)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		if _, _, err := s.GetChain(ctx, chainID); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (s *PostgresStore) AppendChainMessages(ctx context.Context, chainID, runID string, messages []types.Message) error {
@@ -1065,6 +1213,31 @@ func scanSessionRow(row pgx.Row) (*types.SessionRecord, error) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := unmarshalJSONValue(metadataJSON, &record.Metadata); err != nil {
+		return nil, err
+	}
+	return &record, nil
+}
+
+func scanSessionFromRows(rows pgx.Rows) (*types.SessionRecord, error) {
+	var (
+		record       types.SessionRecord
+		metadataJSON []byte
+	)
+	if err := rows.Scan(
+		&record.ID,
+		&record.OrgID,
+		&record.ExternalSessionID,
+		&record.CreatedByPrincipalID,
+		&record.CreatedByPrincipalType,
+		&record.ActorID,
+		&metadataJSON,
+		&record.CreatedAt,
+		&record.UpdatedAt,
+		&record.LatestChainID,
+	); err != nil {
 		return nil, err
 	}
 	if err := unmarshalJSONValue(metadataJSON, &record.Metadata); err != nil {

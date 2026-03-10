@@ -32,7 +32,7 @@ type inputItem struct {
 	Content any    `json:"content,omitempty"` // string | []contentPart
 	// For function_call_output
 	CallID string `json:"call_id,omitempty"`
-	Output string `json:"output,omitempty"`
+	Output *string `json:"output,omitempty"`
 	// For function_call (input items representing previous assistant tool calls)
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`

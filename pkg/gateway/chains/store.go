@@ -51,13 +51,16 @@ type IdempotencyRecord struct {
 
 type Store interface {
 	UpsertSession(ctx context.Context, session *types.SessionRecord) error
+	ListSessions(ctx context.Context, orgID string) ([]types.SessionRecord, error)
 	GetSession(ctx context.Context, sessionID string) (*types.SessionRecord, error)
 	GetSessionByExternal(ctx context.Context, orgID, externalSessionID string) (*types.SessionRecord, error)
 	ListSessionChains(ctx context.Context, sessionID string) ([]types.ChainRecord, error)
 
 	SaveChain(ctx context.Context, chain *types.ChainRecord, history []types.Message) error
 	UpdateChain(ctx context.Context, chain *types.ChainRecord) error
+	ListChains(ctx context.Context, orgID, sessionID string, unsessionedOnly bool) ([]types.ChainRecord, error)
 	GetChain(ctx context.Context, chainID string) (*types.ChainRecord, []types.Message, error)
+	ListChainMessages(ctx context.Context, chainID string) ([]types.ChainMessageRecord, error)
 	AppendChainMessages(ctx context.Context, chainID, runID string, messages []types.Message) error
 	SetChainResumeTokenHash(ctx context.Context, chainID, resumeTokenHash string) error
 	GetChainResumeTokenHash(ctx context.Context, chainID string) (string, error)

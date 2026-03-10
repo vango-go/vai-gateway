@@ -233,8 +233,33 @@ func (s *AppServices) PrepareGatewayObservation(ctx context.Context, in GatewayO
 	sessionID := strings.TrimSpace(in.SessionID)
 	inputFingerprint := strings.TrimSpace(in.InputContextFingerprint)
 	if inputFingerprint != "" {
-		if sessionID != "" {
-			row := s.DB.QueryRow(ctx, `
+		var lookupErr error
+		switch strings.TrimSpace(in.EndpointFamily) {
+		case "runs":
+			parentRequestID, chainID, lookupErr = s.lookupManagedObservedParent(ctx, in.OrgID, in.GatewayAPIKeyID, in.EndpointFamily, sessionID, inputFingerprint)
+		default:
+			parentRequestID, chainID, lookupErr = s.lookupLoggedObservedParent(ctx, in.OrgID, in.GatewayAPIKeyID, in.EndpointFamily, sessionID, inputFingerprint)
+		}
+		switch {
+		case lookupErr == nil:
+		case errors.Is(lookupErr, pgx.ErrNoRows):
+			chainID = newID("chain")
+			parentRequestID = ""
+		default:
+			return nil, lookupErr
+		}
+	}
+	return &PreparedGatewayObservation{
+		RequestID:       requestID,
+		SessionID:       sessionID,
+		ChainID:         chainID,
+		ParentRequestID: parentRequestID,
+	}, nil
+}
+
+func (s *AppServices) lookupLoggedObservedParent(ctx context.Context, orgID, gatewayAPIKeyID, endpointFamily, sessionID, inputFingerprint string) (string, string, error) {
+	if strings.TrimSpace(sessionID) != "" {
+		row := s.DB.QueryRow(ctx, `
 SELECT request_id, chain_id
 FROM gateway_request_logs
 WHERE org_id = $1
@@ -244,17 +269,13 @@ WHERE org_id = $1
   AND output_context_fingerprint = $5
 ORDER BY completed_at DESC
 LIMIT 1`,
-				in.OrgID, in.GatewayAPIKeyID, in.EndpointFamily, sessionID, inputFingerprint,
-			)
-			switch err := row.Scan(&parentRequestID, &chainID); err {
-			case nil:
-			case pgx.ErrNoRows:
-				chainID = newID("chain")
-			default:
-				return nil, err
-			}
-		} else {
-			row := s.DB.QueryRow(ctx, `
+			orgID, gatewayAPIKeyID, endpointFamily, sessionID, inputFingerprint,
+		)
+		var parentRequestID string
+		var chainID string
+		return parentRequestID, chainID, row.Scan(&parentRequestID, &chainID)
+	}
+	row := s.DB.QueryRow(ctx, `
 SELECT request_id, chain_id
 FROM gateway_request_logs
 WHERE org_id = $1
@@ -265,23 +286,39 @@ WHERE org_id = $1
   AND completed_at >= now() - interval '24 hours'
 ORDER BY completed_at DESC
 LIMIT 1`,
-				in.OrgID, in.GatewayAPIKeyID, in.EndpointFamily, inputFingerprint,
-			)
-			switch err := row.Scan(&parentRequestID, &chainID); err {
-			case nil:
-			case pgx.ErrNoRows:
-				chainID = newID("chain")
-			default:
-				return nil, err
-			}
-		}
+		orgID, gatewayAPIKeyID, endpointFamily, inputFingerprint,
+	)
+	var parentRequestID string
+	var chainID string
+	return parentRequestID, chainID, row.Scan(&parentRequestID, &chainID)
+}
+
+func (s *AppServices) lookupManagedObservedParent(ctx context.Context, orgID, gatewayAPIKeyID, endpointFamily, externalSessionID, inputFingerprint string) (string, string, error) {
+	query := `
+SELECT r.id, r.chain_id
+FROM vai_runs r
+LEFT JOIN vai_sessions sess ON sess.id = r.session_id
+WHERE r.org_id = $1
+  AND COALESCE(r.metadata_json->'observability'->>'gateway_api_key_id', '') = $2
+  AND COALESCE(r.metadata_json->'observability'->>'endpoint_family', '') = $3
+  AND COALESCE(r.metadata_json->'observability'->>'output_context_fingerprint', '') = $4`
+	args := []any{orgID, gatewayAPIKeyID, endpointFamily, inputFingerprint}
+	if strings.TrimSpace(externalSessionID) != "" {
+		query += `
+  AND COALESCE(sess.external_session_id, '') = $5`
+		args = append(args, externalSessionID)
+	} else {
+		query += `
+  AND r.session_id IS NULL
+  AND r.completed_at >= now() - interval '24 hours'`
 	}
-	return &PreparedGatewayObservation{
-		RequestID:       requestID,
-		SessionID:       sessionID,
-		ChainID:         chainID,
-		ParentRequestID: parentRequestID,
-	}, nil
+	query += `
+ORDER BY r.completed_at DESC
+LIMIT 1`
+	row := s.DB.QueryRow(ctx, query, args...)
+	var parentRequestID string
+	var chainID string
+	return parentRequestID, chainID, row.Scan(&parentRequestID, &chainID)
 }
 
 func (s *AppServices) RecordGatewayObservation(ctx context.Context, in GatewayObservationRecordInput) error {

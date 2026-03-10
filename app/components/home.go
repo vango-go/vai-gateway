@@ -20,30 +20,10 @@ func HomePage(p HomePageProps) vango.Component {
 		props := s.Props()
 		redirected := setup.Signal(&s, false)
 		pendingConversationID := setup.Signal(&s, "")
-		newConversation := setup.Action(&s,
-			func(ctx context.Context, _ struct{}) (*services.Conversation, error) {
-				return appruntime.Get().Services.CreateConversation(
-					ctx,
-					props.Peek().Actor,
-					"",
-					appruntime.Get().Config.DefaultModel,
-					services.KeySourcePlatformHosted,
-				)
-			},
-			vango.DropWhileRunning(),
-			vango.ActionOnSuccess(func(result any) {
-				conversation, ok := result.(*services.Conversation)
-				if !ok || conversation == nil {
-					return
-				}
-				redirected.Set(true)
-				pendingConversationID.Set(conversation.ID)
-			}),
-		)
 		conversations := setup.ResourceKeyed(&s,
 			func() string { return props.Get().Actor.OrgID },
 			func(ctx context.Context, orgID string) ([]services.Conversation, error) {
-				return appruntime.Get().Services.ListConversations(ctx, orgID)
+				return appruntime.Get().Services.ListManagedConversations(ctx, orgID)
 			},
 		)
 
@@ -94,9 +74,9 @@ func HomePage(p HomePageProps) vango.Component {
 								Button(
 									Type("button"),
 									Class("btn btn-primary"),
-									Disabled(newConversation.IsRunning()),
 									OnClick(func() {
-										newConversation.Run(struct{}{})
+										redirected.Set(true)
+										pendingConversationID.Set(services.NewExternalSessionID("chat"))
 									}),
 									Text("Start a chat"),
 								),

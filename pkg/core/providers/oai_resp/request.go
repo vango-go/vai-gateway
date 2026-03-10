@@ -100,10 +100,11 @@ func (p *Provider) translateMessages(messages []types.Message) []inputItem {
 		// Handle tool results - these become function_call_output items
 		for _, block := range blocks {
 			if tr, ok := block.(types.ToolResultBlock); ok {
+				output := p.toolResultToString(tr.Content)
 				items = append(items, inputItem{
 					Type:   "function_call_output",
 					CallID: tr.ToolUseID,
-					Output: p.toolResultToString(tr.Content),
+					Output: &output,
 				})
 				if p.toolResultNeedsMultimodalMessage(tr.Content) {
 					items = append(items, inputItem{

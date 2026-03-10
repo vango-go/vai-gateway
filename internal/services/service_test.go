@@ -114,10 +114,10 @@ func TestPrepareGatewayObservation_LinksToPriorRequestInSession(t *testing.T) {
 	svc := &AppServices{
 		DB: &neon.TestDB{
 			QueryRowFunc: func(_ context.Context, sql string, args ...any) pgx.Row {
-				if !strings.Contains(sql, "FROM gateway_request_logs") {
+				if !strings.Contains(sql, "FROM vai_runs r") {
 					t.Fatalf("unexpected query: %s", sql)
 				}
-				if got := args[3]; got != "sess_task_123" {
+				if got := args[4]; got != "sess_task_123" {
 					t.Fatalf("session arg = %#v", got)
 				}
 				return neon.NewRow("req_parent_123", "chain_parent_123")

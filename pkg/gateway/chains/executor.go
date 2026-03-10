@@ -129,6 +129,7 @@ func (m *Manager) startRun(ctx context.Context, chainID string, env RuntimeEnvir
 	chain.record.UpdatedAt = now
 	chain.record.MessageCountCached = len(history)
 	runCtx, cancel := context.WithCancel(ctx)
+	runMetadata := withChainRuntimeMetadata(mergeRunMetadata(payload.Metadata, env), len(payload.Input))
 	runRecord := &types.ChainRunRecord{
 		ID:              newID("run"),
 		OrgID:           chain.record.OrgID,
@@ -139,8 +140,13 @@ func (m *Manager) startRun(ctx context.Context, chainID string, env RuntimeEnvir
 		Model:           effective.Model,
 		Status:          types.RunStatusRunning,
 		EffectiveConfig: cloneJSON(effective),
-		Metadata:        cloneJSON(payload.Metadata),
+		Metadata:        runMetadata,
 		StartedAt:       now,
+	}
+	if chain.record.ForkedFromRunID != "" {
+		if existingRuns, listErr := m.store.ListChainRuns(ctx, chainID); listErr == nil && len(existingRuns) == 0 {
+			runRecord.RerunOfRunID = chain.record.ForkedFromRunID
+		}
 	}
 	active := &activeRun{
 		record:       runRecord,
@@ -249,6 +255,49 @@ func (m *Manager) startRun(ctx context.Context, chainID string, env RuntimeEnvir
 	return cloneJSON(runRecord), nil, nil
 }
 
+func mergeRunMetadata(metadata map[string]any, env RuntimeEnvironment) map[string]any {
+	merged := cloneJSON(metadata)
+	if merged == nil {
+		merged = map[string]any{}
+	}
+	obs, _ := merged["observability"].(map[string]any)
+	obs = cloneJSON(obs)
+	if obs == nil {
+		obs = map[string]any{}
+	}
+	obs["transport"] = transportForAttachmentMode(env.Mode)
+	obs["protocol"] = strings.TrimSpace(env.Protocol)
+	obs["attachment_mode"] = string(env.Mode)
+	merged["observability"] = obs
+	return merged
+}
+
+func withChainRuntimeMetadata(metadata map[string]any, inputMessageCount int) map[string]any {
+	merged := cloneJSON(metadata)
+	if merged == nil {
+		merged = map[string]any{}
+	}
+	runtimeMeta, _ := merged["chain_runtime"].(map[string]any)
+	runtimeMeta = cloneJSON(runtimeMeta)
+	if runtimeMeta == nil {
+		runtimeMeta = map[string]any{}
+	}
+	runtimeMeta["input_message_count"] = inputMessageCount
+	merged["chain_runtime"] = runtimeMeta
+	return merged
+}
+
+func transportForAttachmentMode(mode types.AttachmentMode) string {
+	switch mode {
+	case types.AttachmentModeTurnWS, types.AttachmentModeLiveWS:
+		return "websocket"
+	case types.AttachmentModeStatefulSSE:
+		return "sse"
+	default:
+		return "http"
+	}
+}
+
 func (m *Manager) SubmitClientToolResult(ctx context.Context, chainID string, frame types.ClientToolResultFrame) error {
 	chain, err := m.requireChain(ctx, chainID)
 	if err != nil {
@@ -277,7 +326,7 @@ func (m *Manager) SubmitClientToolResult(ctx context.Context, chainID string, fr
 		return types.NewCanonicalError(types.ErrorCodeToolResultConflict, "tool result payload conflicts with the existing resolution").WithChain(chainID).WithRun(frame.RunID).WithExecution(frame.ExecutionID)
 	}
 	execution.Resolved = true
-	execution.Content = cloneJSON(frame.Content)
+	execution.Content = normalizeToolResultContent(frame.Content)
 	execution.IsError = frame.IsError
 	execution.PayloadHash = payloadHash
 	select {
@@ -391,7 +440,7 @@ func (m *Manager) executeRun(ctx context.Context, active *activeRun, history []t
 				StepIndex:       stepIndex,
 				SequenceInRun:   runItemSeq,
 				SequenceInChain: chainItemSeq,
-				Content:         cloneJSON(resp.Content),
+				Content:         cloneContentBlocks(resp.Content),
 				CreatedAt:       time.Now().UTC(),
 			}})
 			m.commitHistory(active.chain, active.record.ID, types.ChainStatusIdle, types.Message{Role: "assistant", Content: resp.Content})
@@ -479,13 +528,15 @@ func (m *Manager) resolveToolBatch(ctx context.Context, active *activeRun, stepI
 			})
 			toolCtx := servertools.ContextWithImageRefRegistry(ctx, imageRefs)
 			content, toolErr := active.gatewayTools.Execute(toolCtx, tu.Name, tu.Input)
-			result := types.RunToolResult{ToolUseID: tu.ID, Content: cloneJSON(content)}
+			result := types.RunToolResult{ToolUseID: tu.ID, Content: cloneContentBlocks(content)}
 			if toolErr != nil {
 				result.IsError = true
 				result.Error = toolErr
 				if len(result.Content) == 0 {
 					result.Content = []types.ContentBlock{types.TextBlock{Type: "text", Text: toolErr.Message}}
 				}
+			} else {
+				result.Content = normalizeToolResultContent(result.Content)
 			}
 			if tu.Name == servertools.ToolImage {
 				result.Content = servertools.FinalizeImageToolResultContent(result.Content, imageRefs)
@@ -494,7 +545,7 @@ func (m *Manager) resolveToolBatch(ctx context.Context, active *activeRun, stepI
 			toolBlocks = append(toolBlocks, types.ToolResultBlock{
 				Type:      "tool_result",
 				ToolUseID: tu.ID,
-				Content:   cloneJSON(result.Content),
+				Content:   cloneContentBlocks(result.Content),
 				IsError:   result.IsError,
 			})
 			items = append(items, types.RunTimelineItem{
@@ -502,14 +553,14 @@ func (m *Manager) resolveToolBatch(ctx context.Context, active *activeRun, stepI
 				Kind:        "tool_result",
 				StepIndex:   stepIndex,
 				ExecutionID: tu.ID,
-				Content:     cloneJSON(result.Content),
+				Content:     cloneContentBlocks(result.Content),
 				CreatedAt:   time.Now().UTC(),
 			})
 			_ = m.emitRunEvent(active.chain, active.record.ID, types.RunToolResultEvent{
 				Type:    "tool_result",
 				ID:      tu.ID,
 				Name:    tu.Name,
-				Content: cloneJSON(result.Content),
+				Content: cloneContentBlocks(result.Content),
 				IsError: result.IsError,
 				Error:   result.Error,
 			})
@@ -526,7 +577,7 @@ func (m *Manager) resolveToolBatch(ctx context.Context, active *activeRun, stepI
 			content := []types.ContentBlock{types.TextBlock{Type: "text", Text: "client-executed tools require the chain websocket transport"}}
 			results = append(results, types.RunToolResult{
 				ToolUseID: tu.ID,
-				Content:   cloneJSON(content),
+				Content:   normalizeToolResultContent(content),
 				IsError:   true,
 				Error: &types.Error{
 					Type:    string(core.ErrInvalidRequest),
@@ -537,7 +588,7 @@ func (m *Manager) resolveToolBatch(ctx context.Context, active *activeRun, stepI
 			toolBlocks = append(toolBlocks, types.ToolResultBlock{
 				Type:      "tool_result",
 				ToolUseID: tu.ID,
-				Content:   cloneJSON(content),
+				Content:   normalizeToolResultContent(content),
 				IsError:   true,
 			})
 			items = append(items, types.RunTimelineItem{
@@ -545,7 +596,7 @@ func (m *Manager) resolveToolBatch(ctx context.Context, active *activeRun, stepI
 				Kind:        "tool_result",
 				StepIndex:   stepIndex,
 				ExecutionID: tu.ID,
-				Content:     cloneJSON(content),
+				Content:     normalizeToolResultContent(content),
 				CreatedAt:   time.Now().UTC(),
 			})
 		}
@@ -559,13 +610,13 @@ func (m *Manager) resolveToolBatch(ctx context.Context, active *activeRun, stepI
 	for _, resolved := range waited {
 		results = append(results, types.RunToolResult{
 			ToolUseID: resolved.ExecutionID,
-			Content:   cloneJSON(resolved.Content),
+			Content:   normalizeToolResultContent(resolved.Content),
 			IsError:   resolved.IsError,
 		})
 		toolBlocks = append(toolBlocks, types.ToolResultBlock{
 			Type:      "tool_result",
 			ToolUseID: resolved.ExecutionID,
-			Content:   cloneJSON(resolved.Content),
+			Content:   normalizeToolResultContent(resolved.Content),
 			IsError:   resolved.IsError,
 		})
 		items = append(items, types.RunTimelineItem{
@@ -573,7 +624,7 @@ func (m *Manager) resolveToolBatch(ctx context.Context, active *activeRun, stepI
 			Kind:        "tool_result",
 			StepIndex:   stepIndex,
 			ExecutionID: resolved.ExecutionID,
-			Content:     cloneJSON(resolved.Content),
+			Content:     normalizeToolResultContent(resolved.Content),
 			CreatedAt:   time.Now().UTC(),
 		})
 	}
@@ -715,7 +766,7 @@ func (m *Manager) executeModelTurn(ctx context.Context, active *activeRun, histo
 			}
 			resp := acc.Response()
 			if resp != nil {
-				return nil, cloneJSON(resp.Content), imageRefs, err
+				return nil, cloneContentBlocks(resp.Content), imageRefs, err
 			}
 			return nil, nil, imageRefs, err
 		}
@@ -724,7 +775,7 @@ func (m *Manager) executeModelTurn(ctx context.Context, active *activeRun, histo
 	if resp == nil {
 		return nil, nil, imageRefs, fmt.Errorf("provider stream completed without a response")
 	}
-	return resp, cloneJSON(resp.Content), imageRefs, nil
+	return resp, cloneContentBlocks(resp.Content), imageRefs, nil
 }
 
 func (m *Manager) commitHistory(chain *hotChain, runID string, status types.ChainStatus, messages ...types.Message) {
@@ -814,7 +865,7 @@ func buildInitialRunItems(effective types.ChainDefaults, input []types.Message, 
 			ID:            newID("item"),
 			Kind:          msg.Role,
 			SequenceInRun: seq,
-			Content:       cloneJSON(msg.ContentBlocks()),
+			Content:       cloneContentBlocks(msg.ContentBlocks()),
 			CreatedAt:     now,
 		})
 	}
@@ -828,7 +879,7 @@ func buildEffectiveRequest(effective types.ChainDefaults, history []types.Messag
 		RunID:           "",
 		Provider:        providerFromModel(effective.Model),
 		Model:           effective.Model,
-		EffectiveConfig: cloneJSON(effective),
+		EffectiveConfig: cloneChainDefaults(effective),
 		Messages:        plannerMessages,
 	}
 }
@@ -838,7 +889,7 @@ func messageRequestFromDefaults(defaults types.ChainDefaults, messages []types.M
 		Model:         defaults.Model,
 		Messages:      cloneMessages(messages),
 		MaxTokens:     defaults.MaxTokens,
-		System:        cloneJSON(defaults.System),
+		System:        normalizedMessageContent(defaults.System),
 		Temperature:   cloneJSON(defaults.Temperature),
 		TopP:          cloneJSON(defaults.TopP),
 		TopK:          cloneJSON(defaults.TopK),
@@ -881,9 +932,11 @@ func contentFromAny(value any) []types.ContentBlock {
 	case string:
 		return []types.ContentBlock{types.TextBlock{Type: "text", Text: typed}}
 	case []types.ContentBlock:
-		return cloneJSON(typed)
+		return cloneContentBlocks(typed)
+	case types.ContentBlock:
+		return cloneContentBlocks([]types.ContentBlock{typed})
 	default:
-		return nil
+		return cloneContentBlocksFromAny(value)
 	}
 }
 
@@ -891,7 +944,7 @@ func valueOrZero(overrides *types.RunOverrides) types.ChainDefaults {
 	if overrides == nil {
 		return types.ChainDefaults{}
 	}
-	return cloneJSON(*overrides)
+	return cloneChainDefaults(*overrides)
 }
 
 func toRunStatus(stopReason types.RunStopReason, err error) types.RunStatus {

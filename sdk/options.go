@@ -39,6 +39,21 @@ func WithGatewayAPIKey(key string) ClientOption {
 	}
 }
 
+// WithHeader adds an additional header to proxy-mode HTTP and WebSocket requests.
+func WithHeader(name, value string) ClientOption {
+	return func(c *Client) {
+		name = strings.TrimSpace(name)
+		value = strings.TrimSpace(value)
+		if name == "" || value == "" {
+			return
+		}
+		if c.extraHeaders == nil {
+			c.extraHeaders = make(map[string]string)
+		}
+		c.extraHeaders[name] = value
+	}
+}
+
 // WithHTTPClient sets the HTTP client used for proxy mode requests.
 // In direct mode, this client is also passed to provider clients when available.
 func WithHTTPClient(client *http.Client) ClientOption {

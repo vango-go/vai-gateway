@@ -768,6 +768,14 @@ func (c *Client) buildLiveHeaders() http.Header {
 		}
 		headers.Set(header, key)
 	}
+	for key, value := range c.extraHeaders {
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if key == "" || value == "" {
+			continue
+		}
+		headers.Set(key, value)
+	}
 	return headers
 }
 

@@ -56,6 +56,7 @@ type ChainRequest struct {
 	Voice             *VoiceConfig
 	Extensions        map[string]any
 	Metadata          map[string]any
+	ProviderMetadata  map[string]any
 	Transport         Transport
 }
 
@@ -87,6 +88,7 @@ type ChainUpdateRequest struct {
 	Voice             *VoiceConfig
 	Extensions        map[string]any
 	Metadata          map[string]any
+	ProviderMetadata  map[string]any
 }
 
 type ChainRunRequest struct {
@@ -109,6 +111,7 @@ type ChainRunRequest struct {
 	Voice             *VoiceConfig
 	Extensions        map[string]any
 	Metadata          map[string]any
+	ProviderMetadata  map[string]any
 }
 
 type ChainStreamEvent any
@@ -163,6 +166,9 @@ type ChainStream struct {
 	closeOnce    sync.Once
 	toolHandlers map[string]ToolHandler
 	toolTimeout  time.Duration
+	cancelMu     sync.Mutex
+	cancel       func() error
+	cancelQueued bool
 }
 
 func (s *ChainsService) Connect(ctx context.Context, req *ChainRequest, opts ...RunOption) (*Chain, error) {
@@ -221,6 +227,68 @@ func (s *ChainsService) Attach(ctx context.Context, req *ChainAttachRequest, opt
 	default:
 		return nil, core.NewInvalidRequestError("unsupported chain transport")
 	}
+}
+
+func (s *ChainsService) Fork(ctx context.Context, chainID string, req *types.ChainForkRequest) (*types.ChainForkResponse, error) {
+	if s == nil || s.client == nil {
+		return nil, core.NewInvalidRequestError("client is not initialized")
+	}
+	if !s.client.isProxyMode() {
+		return nil, core.NewInvalidRequestError("proxy mode is not enabled (set WithBaseURL)")
+	}
+	chainID = strings.TrimSpace(chainID)
+	if chainID == "" {
+		return nil, core.NewInvalidRequestError("chain_id must not be empty")
+	}
+	if req == nil {
+		req = &types.ChainForkRequest{}
+	}
+	headers := s.client.buildChainHeaders()
+	headers.Set(chainSDKIdempotencyHeader, newIdempotencyKey("chain_fork"))
+	resp, endpoint, err := s.client.postGatewayJSON(ctx, "/v1/chains/"+url.PathEscape(chainID)+":fork", req, headers)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, decodeGatewayErrorResponse(resp, endpoint, http.MethodPost)
+	}
+	var forked types.ChainForkResponse
+	if err := json.NewDecoder(resp.Body).Decode(&forked); err != nil {
+		return nil, core.NewAPIError("failed to decode chain fork response")
+	}
+	return &forked, nil
+}
+
+func (s *ChainsService) Regenerate(ctx context.Context, runID string, req *types.RunRegenerateRequest) (*types.ChainForkResponse, error) {
+	if s == nil || s.client == nil {
+		return nil, core.NewInvalidRequestError("client is not initialized")
+	}
+	if !s.client.isProxyMode() {
+		return nil, core.NewInvalidRequestError("proxy mode is not enabled (set WithBaseURL)")
+	}
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return nil, core.NewInvalidRequestError("run_id must not be empty")
+	}
+	if req == nil {
+		req = &types.RunRegenerateRequest{}
+	}
+	headers := s.client.buildChainHeaders()
+	headers.Set(chainSDKIdempotencyHeader, newIdempotencyKey("run_regenerate"))
+	resp, endpoint, err := s.client.postGatewayJSON(ctx, "/v1/runs/"+url.PathEscape(runID)+":regenerate", req, headers)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, decodeGatewayErrorResponse(resp, endpoint, http.MethodPost)
+	}
+	var forked types.ChainForkResponse
+	if err := json.NewDecoder(resp.Body).Decode(&forked); err != nil {
+		return nil, core.NewAPIError("failed to decode run regenerate response")
+	}
+	return &forked, nil
 }
 
 func (c *Chain) ID() string {
@@ -402,6 +470,21 @@ func (s *ChainStream) Close() error {
 	})
 	<-s.done
 	return s.err
+}
+
+func (s *ChainStream) Cancel() error {
+	if s == nil {
+		return nil
+	}
+	s.cancelMu.Lock()
+	cancel := s.cancel
+	if cancel == nil {
+		s.cancelQueued = true
+		s.cancelMu.Unlock()
+		return nil
+	}
+	s.cancelMu.Unlock()
+	return cancel()
 }
 
 func (s *ChainStream) Process(callbacks StreamCallbacks) (string, error) {
@@ -693,21 +776,39 @@ func (c *Chain) runStreamWS(req *ChainRunRequest, cfg *runConfig) (*ChainStream,
 		stream.fail(err)
 		return nil, err
 	}
+	stream.cancelMu.Lock()
+	stream.cancel = func() error {
+		runID := strings.TrimSpace(stream.runID)
+		if runID == "" {
+			stream.cancelQueued = true
+			return nil
+		}
+		return c.sendWSFrame(types.RunCancelFrame{
+			Type:           "run.cancel",
+			IdempotencyKey: newIdempotencyKey("run_cancel"),
+			RunID:          runID,
+		})
+	}
+	stream.cancelMu.Unlock()
 	return stream, nil
 }
 
 func (c *Chain) runStreamSSE(ctx context.Context, req *ChainRunRequest, cfg *runConfig) (*ChainStream, error) {
 	payload := chainRunPayload(req, cfg)
+	runCtx, cancel := context.WithCancel(ctx)
 	endpoint, err := c.client.gatewayEndpoint("/v1/chains/" + url.PathEscape(c.id) + "/runs:stream")
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
+		cancel()
 		return nil, core.NewInvalidRequestError("failed to marshal chain run request")
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(runCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		cancel()
 		return nil, &TransportError{Op: http.MethodPost, URL: endpoint, Err: err}
 	}
 	headers := c.client.buildChainHeaders()
@@ -721,13 +822,21 @@ func (c *Chain) runStreamSSE(ctx context.Context, req *ChainRunRequest, cfg *run
 	}
 	resp, err := c.client.httpClient.Do(httpReq)
 	if err != nil {
+		cancel()
 		return nil, &TransportError{Op: http.MethodPost, URL: endpoint, Err: err}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		cancel()
 		defer resp.Body.Close()
 		return nil, decodeGatewayErrorResponse(resp, endpoint, http.MethodPost)
 	}
 	stream := newChainStream(nil, nil, 0)
+	stream.cancelMu.Lock()
+	stream.cancel = func() error {
+		cancel()
+		return nil
+	}
+	stream.cancelMu.Unlock()
 	go stream.readSSE(resp.Body, endpoint)
 	return stream, nil
 }
@@ -1010,6 +1119,24 @@ func (s *ChainStream) handleRunEvent(event types.RunStreamEvent) {
 	switch e := event.(type) {
 	case types.RunStartEvent:
 		s.runID = strings.TrimSpace(e.RequestID)
+		s.cancelMu.Lock()
+		cancel := s.cancel
+		queued := s.cancelQueued
+		s.cancelQueued = false
+		s.cancelMu.Unlock()
+		if queued && cancel != nil {
+			if err := cancel(); err != nil {
+				s.sendEvent(types.RunErrorEvent{
+					Type: "error",
+					Error: types.Error{
+						Type:    "transport_error",
+						Message: err.Error(),
+					},
+				})
+				s.fail(err)
+				return
+			}
+		}
 	case types.RunCompleteEvent:
 		s.result = e.Result
 		s.sendEvent(e)
@@ -1170,7 +1297,7 @@ func chainDefaultsFromRequest(req *ChainRequest, cfg *runConfig) types.ChainDefa
 		Output:            cloneJSON(req.Output),
 		Voice:             cloneJSON(req.Voice),
 		Extensions:        cloneMap(req.Extensions),
-		Metadata:          cloneMap(req.Metadata),
+		Metadata:          cloneMap(req.ProviderMetadata),
 	}
 }
 
@@ -1193,7 +1320,7 @@ func chainDefaultsFromUpdate(req *ChainUpdateRequest) types.ChainDefaults {
 		Output:            cloneJSON(req.Output),
 		Voice:             cloneJSON(req.Voice),
 		Extensions:        cloneMap(req.Extensions),
-		Metadata:          cloneMap(req.Metadata),
+		Metadata:          cloneMap(req.ProviderMetadata),
 	}
 }
 
@@ -1223,7 +1350,7 @@ func chainRunPayload(req *ChainRunRequest, cfg *runConfig) types.RunStartPayload
 		Output:            cloneJSON(req.Output),
 		Voice:             cloneJSON(req.Voice),
 		Extensions:        cloneMap(req.Extensions),
-		Metadata:          cloneMap(req.Metadata),
+		Metadata:          cloneMap(req.ProviderMetadata),
 	}
 	if hasRunOverrides(overrides) {
 		payload.Overrides = &overrides

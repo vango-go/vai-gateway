@@ -2,7 +2,6 @@ package chains
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"slices"
 	"sync"
@@ -18,9 +17,10 @@ type MemoryStore struct {
 	sessionByExternal map[string]string
 	sessionChains     map[string][]string
 
-	chains       map[string]*types.ChainRecord
-	chainHistory map[string][]types.Message
-	chainResume  map[string]string
+	chains        map[string]*types.ChainRecord
+	chainHistory  map[string][]types.Message
+	chainMessages map[string][]types.ChainMessageRecord
+	chainResume   map[string]string
 
 	runs      map[string]*types.ChainRunRecord
 	chainRuns map[string][]string
@@ -39,6 +39,7 @@ func NewMemoryStore() *MemoryStore {
 		sessionChains:     make(map[string][]string),
 		chains:            make(map[string]*types.ChainRecord),
 		chainHistory:      make(map[string][]types.Message),
+		chainMessages:     make(map[string][]types.ChainMessageRecord),
 		chainResume:       make(map[string]string),
 		runs:              make(map[string]*types.ChainRunRecord),
 		chainRuns:         make(map[string][]string),
@@ -70,6 +71,35 @@ func (s *MemoryStore) GetSession(_ context.Context, sessionID string) (*types.Se
 		return nil, ErrNotFound
 	}
 	return cloneJSON(session), nil
+}
+
+func (s *MemoryStore) ListSessions(_ context.Context, orgID string) ([]types.SessionRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]types.SessionRecord, 0, len(s.sessions))
+	for _, session := range s.sessions {
+		if session == nil || session.OrgID != orgID {
+			continue
+		}
+		out = append(out, *cloneJSON(session))
+	}
+	slices.SortFunc(out, func(a, b types.SessionRecord) int {
+		if a.UpdatedAt.Equal(b.UpdatedAt) {
+			switch {
+			case a.ID < b.ID:
+				return -1
+			case a.ID > b.ID:
+				return 1
+			default:
+				return 0
+			}
+		}
+		if a.UpdatedAt.After(b.UpdatedAt) {
+			return -1
+		}
+		return 1
+	})
+	return out, nil
 }
 
 func (s *MemoryStore) GetSessionByExternal(_ context.Context, orgID, externalSessionID string) (*types.SessionRecord, error) {
@@ -109,6 +139,7 @@ func (s *MemoryStore) SaveChain(_ context.Context, chain *types.ChainRecord, his
 	defer s.mu.Unlock()
 	s.chains[chain.ID] = cloneJSON(chain)
 	s.chainHistory[chain.ID] = cloneMessages(history)
+	s.chainMessages[chain.ID] = buildChainMessageRecords(chain.ID, "", history, 0, chain.CreatedAt)
 	if chain.SessionID != "" {
 		ids := s.sessionChains[chain.SessionID]
 		if !slices.Contains(ids, chain.ID) {
@@ -151,14 +182,60 @@ func (s *MemoryStore) GetChain(_ context.Context, chainID string) (*types.ChainR
 	return cloneJSON(chain), cloneMessages(s.chainHistory[chainID]), nil
 }
 
-func (s *MemoryStore) AppendChainMessages(_ context.Context, chainID, _ string, messages []types.Message) error {
+func (s *MemoryStore) ListChains(_ context.Context, orgID, sessionID string, unsessionedOnly bool) ([]types.ChainRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]types.ChainRecord, 0, len(s.chains))
+	for _, chain := range s.chains {
+		if chain == nil || chain.OrgID != orgID {
+			continue
+		}
+		if sessionID != "" && chain.SessionID != sessionID {
+			continue
+		}
+		if unsessionedOnly && chain.SessionID != "" {
+			continue
+		}
+		out = append(out, *cloneJSON(chain))
+	}
+	slices.SortFunc(out, func(a, b types.ChainRecord) int {
+		if a.UpdatedAt.Equal(b.UpdatedAt) {
+			switch {
+			case a.ID < b.ID:
+				return -1
+			case a.ID > b.ID:
+				return 1
+			default:
+				return 0
+			}
+		}
+		if a.UpdatedAt.After(b.UpdatedAt) {
+			return -1
+		}
+		return 1
+	})
+	return out, nil
+}
+
+func (s *MemoryStore) ListChainMessages(_ context.Context, chainID string) ([]types.ChainMessageRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.chains[chainID]; !ok {
+		return nil, ErrNotFound
+	}
+	return cloneJSON(s.chainMessages[chainID]), nil
+}
+
+func (s *MemoryStore) AppendChainMessages(_ context.Context, chainID, runID string, messages []types.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	chain, ok := s.chains[chainID]
 	if !ok {
 		return ErrNotFound
 	}
+	existing := s.chainMessages[chainID]
 	s.chainHistory[chainID] = append(s.chainHistory[chainID], cloneMessages(messages)...)
+	s.chainMessages[chainID] = append(existing, buildChainMessageRecords(chainID, runID, messages, len(existing), time.Now().UTC())...)
 	chain.MessageCountCached = len(s.chainHistory[chainID])
 	return nil
 }
@@ -325,34 +402,10 @@ func (s *MemoryStore) GetIdempotency(_ context.Context, scope IdempotencyScope) 
 	return cloneJSON(record), nil
 }
 
-func cloneMessages(in []types.Message) []types.Message {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make([]types.Message, len(in))
-	for i := range in {
-		out[i] = cloneJSON(in[i])
-	}
-	return out
-}
-
 func sessionExternalKey(orgID, externalSessionID string) string {
 	return orgID + "::" + externalSessionID
 }
 
 func idempotencyMapKey(scope IdempotencyScope) string {
 	return fmt.Sprintf("%s::%s::%s::%s::%s", scope.OrgID, scope.PrincipalID, scope.ChainID, scope.Operation, scope.IdempotencyKey)
-}
-
-func cloneJSON[T any](value T) T {
-	var zero T
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return zero
-	}
-	var out T
-	if err := json.Unmarshal(encoded, &out); err != nil {
-		return zero
-	}
-	return out
 }

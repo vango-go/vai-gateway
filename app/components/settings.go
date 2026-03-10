@@ -37,9 +37,11 @@ type ObservabilityPageProps struct {
 }
 
 type observabilityData struct {
-	Logs   []services.GatewayRequestListEntry
-	Keys   []services.APIKeyRecord
-	Detail *services.GatewayRequestDetail
+	Logs      []services.GatewayRequestListEntry
+	Keys      []services.APIKeyRecord
+	Detail    *services.GatewayRequestDetail
+	Managed   *services.ManagedObservabilitySnapshot
+	RunDetail *services.ManagedObservabilityRunDetail
 }
 
 type createAPIKeyFormData struct {
@@ -826,6 +828,7 @@ type observabilityFilterState struct {
 	ChainID      string
 	Hours        int
 	RequestID    string
+	RunID        string
 }
 
 func ObservabilityPage(p ObservabilityPageProps) vango.Component {
@@ -839,6 +842,7 @@ func ObservabilityPage(p ObservabilityPageProps) vango.Component {
 		chainID := setup.URLParam(&s, "chain_id", "", vango.Replace)
 		hours := setup.URLParam(&s, "hours", 24, vango.Replace)
 		requestID := setup.URLParam(&s, "request_id", "", vango.Replace)
+		runID := setup.URLParam(&s, "run_id", "", vango.Replace)
 
 		keys := setup.ResourceKeyed(&s,
 			func() string { return props.Get().Actor.OrgID },
@@ -857,6 +861,7 @@ func ObservabilityPage(p ObservabilityPageProps) vango.Component {
 					ChainID:      chainID.Get(),
 					Hours:        hours.Get(),
 					RequestID:    requestID.Get(),
+					RunID:        runID.Get(),
 				}
 			},
 			func(ctx context.Context, filterState observabilityFilterState) (*observabilityData, error) {
@@ -873,6 +878,10 @@ func ObservabilityPage(p ObservabilityPageProps) vango.Component {
 				if err != nil {
 					return nil, fmt.Errorf("load request logs: %w", err)
 				}
+				managed, err := appruntime.Get().Services.ListManagedObservability(ctx, props.Peek().Actor.OrgID, filter)
+				if err != nil {
+					return nil, fmt.Errorf("load managed observability: %w", err)
+				}
 				var detail *services.GatewayRequestDetail
 				if strings.TrimSpace(filterState.RequestID) != "" {
 					detail, err = appruntime.Get().Services.GatewayRequestDetail(ctx, props.Peek().Actor.OrgID, filterState.RequestID)
@@ -880,11 +889,24 @@ func ObservabilityPage(p ObservabilityPageProps) vango.Component {
 						return nil, fmt.Errorf("load request detail: %w", err)
 					}
 				}
+				var runDetail *services.ManagedObservabilityRunDetail
+				if strings.TrimSpace(filterState.RunID) != "" {
+					runDetail, err = appruntime.Get().Services.ManagedRunDetail(ctx, props.Peek().Actor.OrgID, filterState.RunID)
+					if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+						return nil, fmt.Errorf("load run detail: %w", err)
+					}
+				}
 				keyRows, err := appruntime.Get().Services.ListAPIKeys(ctx, props.Peek().Actor.OrgID)
 				if err != nil {
 					return nil, fmt.Errorf("load api keys: %w", err)
 				}
-				return &observabilityData{Logs: logs, Keys: keyRows, Detail: detail}, nil
+				return &observabilityData{
+					Logs:      logs,
+					Keys:      keyRows,
+					Detail:    detail,
+					Managed:   managed,
+					RunDetail: runDetail,
+				}, nil
 			},
 		)
 
@@ -899,6 +921,7 @@ func ObservabilityPage(p ObservabilityPageProps) vango.Component {
 				Hours:        hours.Get(),
 			}
 			selectedRequestID := requestID.Get()
+			selectedRunID := runID.Get()
 			return data.Match(
 				vango.OnLoadingOrPending[*observabilityData](func() *vango.VNode {
 					return LoadingPanel("Loading gateway observability...")
@@ -914,21 +937,19 @@ func ObservabilityPage(p ObservabilityPageProps) vango.Component {
 					return Section(
 						Class("settings-panel"),
 						H1(Text("Gateway observability")),
-						P(Text("Inspect logged `/v1/messages`, `/v1/messages` stream, `/v1/runs`, and `/v1/runs:stream` traffic authenticated with a VAI gateway API key. Sessions are optional and explicit; chains are inferred automatically from context continuity.")),
+						P(Text("Inspect single `/v1/messages` request logs alongside managed sessions, chains, and runs. Transport is recorded per run, so stateful HTTP/SSE and chain WebSocket activity show up in the same managed history model.")),
 						Form(
 							Method("GET"),
 							Action("/settings/observability"),
 							Class("observability-filters"),
 							Div(
 								Class("stack"),
-								Label(Text("Endpoint")),
+								Label(Text("Single request type")),
 								Select(
 									Name("endpoint_kind"),
-									Option(Value(""), Text("All endpoints")),
+									Option(Value(""), Text("All single requests")),
 									Option(Value(endpointKindMessages), selectedIf(currentFilter.EndpointKind == endpointKindMessages), Text("Messages")),
 									Option(Value(endpointKindMessagesSSE), selectedIf(currentFilter.EndpointKind == endpointKindMessagesSSE), Text("Messages stream")),
-									Option(Value(endpointKindRuns), selectedIf(currentFilter.EndpointKind == endpointKindRuns), Text("Runs")),
-									Option(Value(endpointKindRunsSSE), selectedIf(currentFilter.EndpointKind == endpointKindRunsSSE), Text("Runs stream")),
 								),
 							),
 							Div(
@@ -979,9 +1000,9 @@ func ObservabilityPage(p ObservabilityPageProps) vango.Component {
 								A(Href("/settings/observability"), Class("btn btn-secondary"), Text("Reset")),
 							),
 						),
-						H2(Text("Request logs")),
+						H2(Text("Single requests")),
 						If(len(modelData.Logs) == 0,
-							Div(Class("empty-state compact"), P(Text("No matching gateway requests found."))),
+							Div(Class("empty-state compact"), P(Text("No matching single-request logs found."))),
 						),
 						Div(
 							Class("table-stack observability-list"),
@@ -1018,8 +1039,18 @@ func ObservabilityPage(p ObservabilityPageProps) vango.Component {
 								},
 							),
 						),
+						H2(Text("Sessions & chains")),
+						If(modelData.Managed == nil || (len(modelData.Managed.Sessions) == 0 && len(modelData.Managed.UnsessionedChains) == 0),
+							Div(Class("empty-state compact"), P(Text("No matching managed sessions or chains found."))),
+						),
+						If(modelData.Managed != nil,
+							RenderManagedObservability(modelData.Managed, currentFilter, selectedRunID),
+						),
 						If(modelData.Detail != nil,
 							RenderObservabilityDetail(modelData.Detail),
+						),
+						If(modelData.RunDetail != nil,
+							RenderManagedRunDetail(modelData.RunDetail),
 						),
 					)
 				}),
@@ -1031,6 +1062,4 @@ func ObservabilityPage(p ObservabilityPageProps) vango.Component {
 const (
 	endpointKindMessages    = "messages"
 	endpointKindMessagesSSE = "messages_stream"
-	endpointKindRuns        = "runs"
-	endpointKindRunsSSE     = "runs_stream"
 )

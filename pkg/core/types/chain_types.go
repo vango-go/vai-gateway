@@ -120,6 +120,10 @@ type SessionChainList struct {
 	Items []ChainRecord `json:"items"`
 }
 
+type SessionList struct {
+	Items []SessionRecord `json:"items"`
+}
+
 type ChainRecord struct {
 	ID                     string                `json:"id"`
 	OrgID                  string                `json:"org_id,omitempty"`
@@ -166,9 +170,36 @@ type ChainRunList struct {
 	Items []ChainRunRecord `json:"items"`
 }
 
+type ChainList struct {
+	Items []ChainRecord `json:"items"`
+}
+
 type ChainRunResultEnvelope struct {
 	Run    *ChainRunRecord `json:"run,omitempty"`
 	Result *RunResult      `json:"result,omitempty"`
+}
+
+type ChainForkRequest struct {
+	History         []Message      `json:"history,omitempty"`
+	Defaults        ChainDefaults  `json:"defaults,omitempty"`
+	Metadata        map[string]any `json:"metadata,omitempty"`
+	ForkedFromRunID string         `json:"forked_from_run_id,omitempty"`
+}
+
+type RunRegenerateRequest struct {
+	Defaults ChainDefaults  `json:"defaults,omitempty"`
+	Metadata map[string]any `json:"metadata,omitempty"`
+}
+
+type ChainForkResponse struct {
+	ChainID           string        `json:"chain_id"`
+	SessionID         string        `json:"session_id,omitempty"`
+	ExternalSessionID string        `json:"external_session_id,omitempty"`
+	ParentChainID     string        `json:"parent_chain_id,omitempty"`
+	ForkedFromRunID   string        `json:"forked_from_run_id,omitempty"`
+	Defaults          ChainDefaults `json:"defaults,omitempty"`
+	ResumeToken       string        `json:"resume_token,omitempty"`
+	Input             []Message     `json:"input,omitempty"`
 }
 
 type ChainContextResponse struct {
@@ -208,6 +239,16 @@ type EffectiveRequestResponse struct {
 	Model           string        `json:"model"`
 	EffectiveConfig ChainDefaults `json:"effective_config"`
 	Messages        []Message     `json:"messages"`
+}
+
+type ChainMessageRecord struct {
+	ID              string    `json:"id"`
+	ChainID         string    `json:"chain_id"`
+	RunID           string    `json:"run_id,omitempty"`
+	Role            string    `json:"role"`
+	SequenceInChain int       `json:"sequence_in_chain"`
+	Content         any       `json:"content,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
 }
 
 type AssetRecord struct {

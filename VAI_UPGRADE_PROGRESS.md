@@ -83,6 +83,14 @@ Implement the upgraded VAI gateway design in a production-ready way across the g
 - [completed] Add regression coverage for revoke/create with delayed key-list refetches.
 - [completed] Re-run focused `app/components` verification and record the outcome.
 
+### 13. Managed observability and demo-chat migration
+
+- [in_progress] Rework observability around single requests plus managed sessions/chains/runs.
+- [in_progress] Add the remaining org-scoped history list/read/fork/regenerate APIs required by the platform.
+- [completed] Move the demo chat to managed session/chain history as the source of truth.
+- [completed] Add a demo-chat transport toggle for stateful HTTP/SSE versus chain WebSocket mode.
+- [pending] Verify that both chat modes feed the same managed observability model.
+
 ## Progress Log
 
 ### 2026-03-10
@@ -210,6 +218,53 @@ Implement the upgraded VAI gateway design in a production-ready way across the g
     - `TestDevelopersPageCreateAndRevokeKey`
 - Investigated the `app/components` failure:
   - `TestDevelopersPageCreateAndRevokeKey` passes in isolation and under repetition
+- Continued the managed observability and demo-chat migration:
+  - moved the platform chat and home surfaces onto managed session/chain history
+  - added the per-chat stateful SSE vs WebSocket transport toggle
+  - routed new demo-chat sends through public chain APIs instead of legacy conversation persistence
+  - wired platform chat run metadata so managed observability can surface transport, endpoint kind, key source, and access credential for both modes
+- Current gap being closed now:
+  - add public `POST /v1/chains/{id}:fork` and `POST /v1/runs/{id}:regenerate` so branching/regeneration exists as first-class managed-history API surface rather than only internal chat composition logic
+- Finished the public branch/regenerate API pass:
+  - added managed history types for chain fork and run regenerate responses
+  - added durable chain-message record listing so regenerate can reconstruct the exact pre-run fork point and resend input safely
+  - added manager preview/create paths for `chain.fork` and `run.regenerate` with shared auth, idempotency, resume-token issuance, and session continuity
+  - added `POST /v1/chains/{id}:fork` and `POST /v1/runs/{id}:regenerate`
+  - made first runs on regenerated forks carry `rerun_of_run_id`
+  - added SDK helpers for `client.Chains.Fork(...)` and `client.Chains.Regenerate(...)`
+  - tightened stateful run pre-validation to use auth-aware chain reads instead of unauthenticated raw chain lookups
+  - fixed history read endpoints so canonical chain auth failures are preserved on HTTP reads instead of being flattened into generic core errors
+- Added focused verification for the branch/history work:
+  - chain fork handler contract test
+  - run regenerate contract test covering the follow-up rerun and `rerun_of_run_id`
+  - org-scoped history list/read contract test for sessions and chains
+  - SDK HTTP helper tests for fork and regenerate
+- Refreshed Vango app state artifacts after the managed chat / observability component changes:
+  - `vango state apply`
+  - `vango gen bindings`
+- Final verification after the branch/history completion:
+  - `go test ./pkg/gateway/chains ./pkg/gateway/handlers -count=1`
+  - `go test ./sdk -run 'TestChains(Fork_UsesHTTPEndpoint|Regenerate_UsesHTTPEndpoint|RunStreamCancel_SendsRunCancelFrame)' -count=1`
+  - `go test ./app/components -count=1`
+  - `go test ./sdk ./pkg/gateway/... ./cmd/server ./internal/services ./internal/chatruntime -count=1`
+  - `go test ./... -count=1`
+  - `VAI_SMOKE_REAL=1 go test ./sdk -run TestChainsConnect_Run_WebsocketRealProvider -count=1 -v`
+
+### 2026-03-10 follow-up bugfixes
+
+- Investigated the platform chat failure on stateful SSE with `oai-resp`:
+  - real root cause was not the provider adapter or chat handler
+  - the chain SDK was duplicating `Metadata` into both gateway-managed chain/run metadata and provider-bound `defaults.metadata` / `overrides.metadata`
+  - platform demo chat uses nested `observability` objects in `Metadata`, which `oai-resp` rejects because OpenAI Responses metadata values must be scalar/string-like
+- Fixed the chain SDK contract so metadata roles are explicit:
+  - `Metadata` now maps only to top-level chain/run metadata for gateway-managed storage and observability
+  - new `ProviderMetadata` fields on `ChainRequest`, `ChainUpdateRequest`, and `ChainRunRequest` map to provider-bound `defaults.metadata` / `overrides.metadata`
+  - this prevents internal observability payloads from leaking into upstream provider requests while still preserving a way to send explicit provider metadata when needed
+- Added regression coverage for both transports:
+  - websocket chain connect/run test now asserts internal `Metadata` stays top-level while `ProviderMetadata` is the only metadata forwarded to provider-bound defaults/overrides
+  - added a dedicated stateful SSE chain test asserting the same separation on `/v1/chains` + `/v1/chains/{id}/runs:stream`
+- Verification for the metadata-separation fix:
+  - `go test ./sdk ./app/components ./internal/chatruntime ./cmd/server -count=1`
   - the failing HTML captured during the broader run shows the revoke action in-flight while the list still renders stale resource data
   - `DevelopersPage` currently renders directly from the `keys` resource and only calls `keys.Refetch()` after create/revoke success, unlike the chat page which preserves a last-ready snapshot during refetches
 - Locked the remediation approach for the developers page:
@@ -238,3 +293,53 @@ Implement the upgraded VAI gateway design in a production-ready way across the g
   - `go test ./app/components -run TestObservabilityPageLoadsWithoutBindingMismatch -count=1`
   - `go test ./... -count=1` in `vai-gateway`
   - restarted `vango dev` with the updated code and confirmed the observability route no longer triggers a server panic during a live request
+- Started the managed observability + demo-chat migration pass:
+  - confirmed the platform observability page still only reads `gateway_request_logs` / `gateway_run_traces`
+  - confirmed the platform chat still uses legacy `conversations` / `conversation_messages` plus stateless `/v1/runs:stream`
+  - traced the existing managed-history gateway surface and verified the clean migration seam is:
+    - add missing session/chain list and branch endpoints with org-scoped auth
+    - use managed chain/session/run records as the platform’s history source of truth
+    - keep `gateway_request_logs` only for single-request `/v1/messages*` observability
+- Current implementation focus for the demo-chat migration:
+  - treat `/chat/{id}` as an `external_session_id` draft instead of a durable `conversations.id`
+  - load sidebar/home/detail state from managed `vai_sessions` / `vai_chains` / `vai_runs`
+  - use stateful chain SSE as the normal chat mode and `/v1/chains/ws` as the websocket mode
+  - preserve regenerate/edit by starting a new chain seeded from rewritten managed history instead of mutating legacy conversation rows
+- Implementation note before editing:
+  - chat continuation on SSE can reuse an existing `chain_id` without a `resume_token`
+  - chat continuation on websocket requires a live `resume_token`; if the page loses it, the fallback is to start a new chain in the same external session seeded from managed history
+  - that keeps the demo aligned with the managed session/chain model even across reloads or transport changes
+- Investigated the next platform chat failure in stateful SSE mode after the metadata fix:
+  - upstream error was `oai-resp: invalid_request_error: Missing required parameter: 'input[5].output'`
+  - the visible tool trace already showed the real clue: the gateway emitted a `tool_call_start` for `vai_web_search`, then persisted a `tool_result` with `content: []`
+  - this was not a web-search provider failure; it was a chain-runtime serialization bug
+- Root cause:
+  - the chain runtime was using a generic JSON round-trip clone helper on values that contain `[]types.ContentBlock`
+  - Go cannot unmarshal JSON objects back into a slice of non-empty interfaces without explicit decoding, so those clone calls silently zeroed tool-result content
+  - the broken clones existed in the hot execution path (`resolveToolBatch`, `SubmitClientToolResult`, partial-response buffering, initial timeline items) and in managed-history cloning/storage helpers
+  - once the empty tool result reached the OpenAI Responses adapter, `function_call_output.output` became an empty string and was omitted by `omitempty`, which produced the upstream validation error
+- Fixed the chain-runtime and managed-history serialization path properly:
+  - added shared typed helpers for `cloneContentBlocks`, `cloneMessages`, normalized flexible message content, and explicit empty tool-result normalization
+  - replaced all direct `cloneJSON([]ContentBlock)` usage in the chain executor with typed content cloning
+  - normalized empty successful tool results into an explicit empty text block so the runtime records a real resolved tool output instead of an ambiguous empty slice
+  - updated chain/default cloning to preserve `system` content when it is block-based rather than plain string
+  - moved content-bearing chain-message record construction onto the same normalized content path
+- Hardened managed-history decode paths so persisted content round-trips correctly:
+  - added custom JSON unmarshal logic for `types.ChainDefaults` so `system` survives as string or `[]ContentBlock`
+  - added custom JSON unmarshal logic for `types.RunTimelineItem` so timeline content survives Postgres/memory-store decode correctly
+  - this fixed not only the SSE runtime failure but also adjacent risks in timeline/effective-request/history reads for content-bearing chain data
+- Added a provider-side safety belt for OpenAI Responses:
+  - `function_call_output.output` is now always serialized, even when the tool result is logically empty
+  - this prevents future empty-result regressions from reappearing as missing-parameter provider errors
+- Added focused regressions:
+  - `pkg/gateway/chains/executor_test.go` now proves a gateway tool result survives into the second model request and the persisted run timeline
+  - added a normalization regression for explicit empty tool results
+  - `pkg/core/providers/oai_resp/request_response_test.go` now proves empty tool results still serialize an explicit `output` field for `function_call_output`
+- Verification after the tool-result serialization fix:
+  - `go test ./pkg/core/types ./pkg/core/providers/oai_resp ./pkg/gateway/chains ./pkg/gateway/handlers ./internal/chatruntime ./app/components ./sdk -count=1`
+  - `go test ./... -count=1`
+- Follow-up after the first tool-result adapter hardening:
+  - the initial fix removed `omitempty` from `oai_resp.inputItem.output`, which accidentally serialized `output` on ordinary `message` items too
+  - OpenAI Responses then rejected simple requests with `Unknown parameter: 'input[0].output'`
+  - corrected the adapter by making `inputItem.Output` a pointer so only actual `function_call_output` items include the field, while empty tool results still serialize `"output":""`
+  - added a regression proving regular message items do not emit `output`

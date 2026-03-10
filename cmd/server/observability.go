@@ -51,6 +51,7 @@ type observedGatewayCompletion struct {
 	OutputContextFingerprint string
 	RunTrace                 *services.GatewayRunTraceRecord
 	Usage                    *types.Usage
+	RunResult                *types.RunResult
 }
 
 func ensureGatewayRequestID(headers http.Header) string {
@@ -267,6 +268,7 @@ func completeObservedGatewayRequest(observed *observedGatewayRequest, statusCode
 		if env.Result == nil {
 			return completion, nil
 		}
+		completion.RunResult = env.Result
 		completion.Usage = &env.Result.Usage
 		completion.ResponseBody = mustJSONText(env)
 		completion.ResponseSummary = mustJSONText(runResultSummary(env.Result, false))
@@ -284,6 +286,7 @@ func completeObservedGatewayRequest(observed *observedGatewayRequest, statusCode
 			return nil, err
 		}
 		if result != nil {
+			completion.RunResult = result
 			completion.Usage = &result.Usage
 			completion.ResponseBody = mustJSONText(types.RunResultEnvelope{Result: result})
 			completion.ResponseSummary = mustJSONText(runResultSummary(result, streamErr != nil))

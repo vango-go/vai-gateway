@@ -158,8 +158,9 @@ func (s *Server) routes() {
 	s.mux.Handle("/v1/assets:upload-intent", handlers.AssetsHandler{Config: s.cfg, Logger: s.logger, Assets: s.assets})
 	s.mux.Handle("/v1/assets:claim", handlers.AssetsHandler{Config: s.cfg, Logger: s.logger, Assets: s.assets})
 	s.mux.Handle("/v1/assets/", handlers.AssetsHandler{Config: s.cfg, Logger: s.logger, Assets: s.assets})
-	s.mux.Handle("/v1/sessions/", handlers.SessionsHandler{Chains: s.chains})
-	s.mux.Handle("/v1/runs/", handlers.ChainRunsReadHandler{Chains: s.chains})
+	s.mux.Handle("/v1/sessions", handlers.SessionsHandler{Config: s.cfg, Chains: s.chains})
+	s.mux.Handle("/v1/sessions/", handlers.SessionsHandler{Config: s.cfg, Chains: s.chains})
+	s.mux.Handle("/v1/runs/", handlers.ChainRunsReadHandler{Config: s.cfg, Chains: s.chains})
 	s.mux.Handle("/v1/server-tools:execute", handlers.ServerToolsHandler{
 		Config:     s.cfg,
 		HTTPClient: s.httpClient,

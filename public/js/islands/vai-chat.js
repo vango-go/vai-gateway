@@ -210,6 +210,10 @@ function preferredKeySourceStorageKey(conversationId) {
   return `vai-lite:key-source:${conversationId}`;
 }
 
+function preferredTransportStorageKey(conversationId) {
+  return `vai-lite:transport:${conversationId}`;
+}
+
 function loadBYOK(providerHints) {
   const out = {};
   for (const hint of providerHints || []) {
@@ -265,6 +269,22 @@ function persistPreferredKeySource(conversationId, value) {
   } catch {}
 }
 
+function preferredTransport(props) {
+  try {
+    const stored = localStorage.getItem(preferredTransportStorageKey(props.conversationId));
+    if (stored === "sse" || stored === "websocket") {
+      return stored;
+    }
+  } catch {}
+  return props?.initialTransport === "websocket" ? "websocket" : "sse";
+}
+
+function persistPreferredTransport(conversationId, value) {
+  try {
+    localStorage.setItem(preferredTransportStorageKey(conversationId), value);
+  } catch {}
+}
+
 function createElement(html) {
   const template = document.createElement("template");
   template.innerHTML = html.trim();
@@ -313,6 +333,8 @@ function hostedModelAvailable(state) {
 
 function keySourceLabel(source) {
   switch (String(source || "")) {
+    case "":
+      return "";
     case "platform_hosted":
       return "VAI credits";
     case "customer_byok_vault":
@@ -322,7 +344,7 @@ function keySourceLabel(source) {
     case "customer_byok_external":
       return "External BYOK";
     default:
-      return source || "unknown";
+      return source || "";
   }
 }
 
@@ -488,7 +510,11 @@ function renderMessagesHTML(messages, streaming) {
         }">
           <header class="message-meta">
             <span class="message-role">${message.role === "assistant" ? "Assistant" : "You"}</span>
-            <span class="message-source">${escapeHTML(keySourceLabel(message.keySource || ""))}</span>
+            ${
+              keySourceLabel(message.keySource || "")
+                ? `<span class="message-source">${escapeHTML(keySourceLabel(message.keySource || ""))}</span>`
+                : ""
+            }
             ${
               message.createdAt
                 ? `<time datetime="${escapeHTML(message.createdAt)}">${escapeHTML(
@@ -542,6 +568,7 @@ export function mount(el, props, api) {
     pendingAttachments: [],
     byok: loadBYOK(props?.providerHints),
     keySource: preferredKeySource(props || {}),
+    transport: preferredTransport(props || {}),
     currentModel:
       props?.model ||
       (Array.isArray(props?.modelOptions) ? props.modelOptions.find((item) => item?.selected)?.id : "") ||
@@ -562,6 +589,10 @@ export function mount(el, props, api) {
         <div class="control-group">
           <label class="control-label" for="chat-model">Model</label>
           <select id="chat-model" class="control-input"></select>
+        </div>
+        <div class="control-group">
+          <div class="control-label">Transport</div>
+          <div class="segmented" data-role="transport"></div>
         </div>
         <div class="control-group control-group-wide">
           <div class="control-label">Key source</div>
@@ -601,6 +632,7 @@ export function mount(el, props, api) {
   const refs = {
     banner: root.querySelector('[data-role="banner"]'),
     modelSelect: root.querySelector("#chat-model"),
+    transport: root.querySelector('[data-role="transport"]'),
     keySource: root.querySelector('[data-role="key-source"]'),
     balance: root.querySelector('[data-role="balance"]'),
     byokPanel: root.querySelector('[data-role="byok-panel"]'),
@@ -727,6 +759,17 @@ export function mount(el, props, api) {
     `;
   }
 
+  function renderTransportControls() {
+    refs.transport.innerHTML = `
+      <button type="button" class="segment${state.transport === "sse" ? " segment-active" : ""}" data-transport="sse"${
+        state.busy ? ' disabled="disabled"' : ""
+      }>Stateful SSE</button>
+      <button type="button" class="segment${state.transport === "websocket" ? " segment-active" : ""}" data-transport="websocket"${
+        state.busy ? ' disabled="disabled"' : ""
+      }>WebSocket</button>
+    `;
+  }
+
   function renderBYOKPanel() {
     const show = effectiveKeySource(state) === "customer_byok_browser";
     refs.byokPanel.hidden = !show;
@@ -765,8 +808,11 @@ export function mount(el, props, api) {
     const source = effectiveKeySource(state);
     const hostedBalanceStatus = balanceStatus(state);
     const chips = [];
-    chips.push(`<span class="meta-chip">${escapeHTML(keySourceLabel(source))}</span>`);
+    if (keySourceLabel(source)) {
+      chips.push(`<span class="meta-chip">${escapeHTML(keySourceLabel(source))}</span>`);
+    }
     chips.push(`<span class="meta-chip">Model ${escapeHTML(state.currentModel)}</span>`);
+    chips.push(`<span class="meta-chip">Transport ${escapeHTML(state.transport === "websocket" ? "WebSocket" : "Stateful SSE")}</span>`);
     if (state.editMessageId) {
       chips.push(
         `<button type="button" class="ghost-action" data-action="cancel-edit">Cancel edit</button><span class="meta-chip meta-chip-warning">Editing earlier message</span>`,
@@ -808,11 +854,13 @@ export function mount(el, props, api) {
     refs.stopButton.hidden = !state.busy;
     refs.stopButton.disabled = !state.busy;
     refs.sendButton.textContent = state.editMessageId ? "Save and rerun" : "Send";
+    renderTransportControls();
   }
 
   function renderStaticBits() {
     refs.balance.textContent = balanceLabel(state);
     renderModelOptions();
+    renderTransportControls();
     renderKeySourceControls();
     renderBYOKPanel();
     renderPendingAttachments();
@@ -1068,6 +1116,7 @@ export function mount(el, props, api) {
         message: text,
         model: state.currentModel,
         keySource: source,
+        transport: state.transport,
         attachmentIds: state.pendingAttachments.map((attachment) => attachment.id),
         regenerate,
         editMessageId: state.editMessageId || "",
@@ -1119,6 +1168,17 @@ export function mount(el, props, api) {
     persistPreferredKeySource(state.props.conversationId, state.keySource);
     renderKeySourceControls();
     renderBYOKPanel();
+    renderComposerMeta();
+  });
+
+  refs.transport.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-transport]");
+    if (!button || button.disabled) {
+      return;
+    }
+    state.transport = button.dataset.transport === "websocket" ? "websocket" : "sse";
+    persistPreferredTransport(state.props.conversationId, state.transport);
+    renderTransportControls();
     renderComposerMeta();
   });
 

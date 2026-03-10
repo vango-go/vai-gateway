@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -58,6 +59,8 @@ func (h ChainsHandler) serveChainsRoot(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
 		h.createChain(w, r)
+	case http.MethodGet:
+		h.listChains(w, r)
 	default:
 		writeCoreErrorJSON(w, requestID(r), &core.Error{Type: core.ErrInvalidRequest, Message: "method not allowed", Code: "method_not_allowed", RequestID: requestID(r)}, http.StatusMethodNotAllowed)
 	}
@@ -68,6 +71,19 @@ func (h ChainsHandler) serveChainPath(w http.ResponseWriter, r *http.Request) {
 	path = strings.Trim(path, "/")
 	if path == "" {
 		NotFoundHandler{}.ServeHTTP(w, r)
+		return
+	}
+	if strings.HasSuffix(path, ":fork") {
+		chainID := strings.TrimSpace(strings.TrimSuffix(path, ":fork"))
+		if chainID == "" {
+			NotFoundHandler{}.ServeHTTP(w, r)
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeCoreErrorJSON(w, requestID(r), &core.Error{Type: core.ErrInvalidRequest, Message: "method not allowed", Code: "method_not_allowed", RequestID: requestID(r)}, http.StatusMethodNotAllowed)
+			return
+		}
+		h.forkChain(w, r, chainID)
 		return
 	}
 	parts := strings.Split(path, "/")
@@ -186,8 +202,46 @@ func (h ChainsHandler) patchChain(w http.ResponseWriter, r *http.Request, chainI
 	writeJSON(w, event)
 }
 
+func (h ChainsHandler) forkChain(w http.ResponseWriter, r *http.Request, chainID string) {
+	if h.Chains == nil {
+		writeCoreErrorJSON(w, requestID(r), core.NewInvalidRequestError("chain runtime is not configured"), http.StatusServiceUnavailable)
+		return
+	}
+	idempotencyKey := strings.TrimSpace(r.Header.Get(idempotencyKeyHeader))
+	if idempotencyKey == "" {
+		writeCanonicalErrorJSON(w, types.NewCanonicalError(types.ErrorCodeProtocolUnknownFrame, "Idempotency-Key header is required").WithChain(chainID))
+		return
+	}
+	body, ok := readBoundedBody(w, r, h.Config.MaxBodyBytes)
+	if !ok {
+		return
+	}
+	var payload types.ChainForkRequest
+	if err := decodeStrictJSON(body, &payload); err != nil {
+		h.writeChainError(w, requestID(r), err)
+		return
+	}
+	pr := chainPrincipalFromRequest(r, h.Config)
+	preview, err := h.Chains.PreviewForkChain(r.Context(), pr, chainID, payload)
+	if err != nil {
+		h.writeChainError(w, requestID(r), err)
+		return
+	}
+	if err := h.validateChainMessageRequest(preview.Defaults, preview.History); err != nil {
+		h.writeChainError(w, requestID(r), err)
+		return
+	}
+	resp, err := h.Chains.ForkChain(withHandlerTimeout(r.Context(), h.Config.HandlerTimeout), pr, chainID, payload, idempotencyKey)
+	if err != nil {
+		h.writeChainError(w, requestID(r), err)
+		return
+	}
+	writeJSON(w, resp)
+}
+
 func (h ChainsHandler) getChain(w http.ResponseWriter, r *http.Request, chainID string) {
-	record, err := h.Chains.GetChain(r.Context(), chainID)
+	pr := chainPrincipalFromRequest(r, h.Config)
+	record, err := h.Chains.GetChainAuthorized(r.Context(), pr, chainID)
 	if err != nil {
 		h.writeChainError(w, requestID(r), err)
 		return
@@ -196,9 +250,10 @@ func (h ChainsHandler) getChain(w http.ResponseWriter, r *http.Request, chainID 
 }
 
 func (h ChainsHandler) getChainContext(w http.ResponseWriter, r *http.Request, chainID string) {
+	pr := chainPrincipalFromRequest(r, h.Config)
 	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	if format == "" || format == "messages" {
-		resp, err := h.Chains.GetChainContext(r.Context(), chainID)
+		resp, err := h.Chains.GetChainContextAuthorized(r.Context(), pr, chainID)
 		if err != nil {
 			h.writeChainError(w, requestID(r), err)
 			return
@@ -208,14 +263,14 @@ func (h ChainsHandler) getChainContext(w http.ResponseWriter, r *http.Request, c
 		return
 	}
 	if format == "timeline" {
-		runs, err := h.Chains.ListRuns(r.Context(), chainID)
+		runs, err := h.Chains.ListRunsAuthorized(r.Context(), pr, chainID)
 		if err != nil {
 			h.writeChainError(w, requestID(r), err)
 			return
 		}
 		items := make([]types.RunTimelineItem, 0)
 		for i := range runs {
-			timeline, timelineErr := h.Chains.GetRunTimeline(r.Context(), runs[i].ID)
+			timeline, timelineErr := h.Chains.GetRunTimelineAuthorized(r.Context(), pr, runs[i].ID)
 			if timelineErr != nil {
 				h.writeChainError(w, requestID(r), timelineErr)
 				return
@@ -233,12 +288,29 @@ func (h ChainsHandler) getChainContext(w http.ResponseWriter, r *http.Request, c
 }
 
 func (h ChainsHandler) listChainRuns(w http.ResponseWriter, r *http.Request, chainID string) {
-	runs, err := h.Chains.ListRuns(r.Context(), chainID)
+	pr := chainPrincipalFromRequest(r, h.Config)
+	runs, err := h.Chains.ListRunsAuthorized(r.Context(), pr, chainID)
 	if err != nil {
 		h.writeChainError(w, requestID(r), err)
 		return
 	}
 	writeJSON(w, &types.ChainRunList{Items: runs})
+}
+
+func (h ChainsHandler) listChains(w http.ResponseWriter, r *http.Request) {
+	if h.Chains == nil {
+		writeCoreErrorJSON(w, requestID(r), core.NewInvalidRequestError("chain runtime is not configured"), http.StatusServiceUnavailable)
+		return
+	}
+	pr := chainPrincipalFromRequest(r, h.Config)
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	unsessionedOnly := strings.EqualFold(strings.TrimSpace(r.URL.Query().Get("unsessioned_only")), "true")
+	chains, err := h.Chains.ListChains(r.Context(), pr, sessionID, unsessionedOnly)
+	if err != nil {
+		h.writeChainError(w, requestID(r), err)
+		return
+	}
+	writeJSON(w, &types.ChainList{Items: chains})
 }
 
 func (h ChainsHandler) runChainBlocking(w http.ResponseWriter, r *http.Request, chainID string) {
@@ -252,11 +324,11 @@ func (h ChainsHandler) runChainBlocking(w http.ResponseWriter, r *http.Request, 
 		h.writeChainError(w, requestID(r), err)
 		return
 	}
-	if err := h.validateRunStart(chainID, payload); err != nil {
+	pr := chainPrincipalFromRequest(r, h.Config)
+	if err := h.validateRunStartAuthorized(r.Context(), pr, chainID, payload); err != nil {
 		h.writeChainError(w, requestID(r), err)
 		return
 	}
-	pr := chainPrincipalFromRequest(r, h.Config)
 	env := chainEnv(h, pr, r.Header, types.AttachmentModeStatefulHTTP, "http", false, nil)
 	ctx := withHandlerTimeout(r.Context(), h.Config.HandlerTimeout)
 	run, result, err := h.Chains.RunBlocking(ctx, chainID, env, *payload, idempotencyKey)
@@ -283,7 +355,8 @@ func (h ChainsHandler) runChainStream(w http.ResponseWriter, r *http.Request, ch
 		h.writeChainError(w, reqID, err)
 		return
 	}
-	if err := h.validateRunStart(chainID, payload); err != nil {
+	pr := chainPrincipalFromRequest(r, h.Config)
+	if err := h.validateRunStartAuthorized(r.Context(), pr, chainID, payload); err != nil {
 		h.writeChainError(w, reqID, err)
 		return
 	}
@@ -330,7 +403,6 @@ func (h ChainsHandler) runChainStream(w http.ResponseWriter, r *http.Request, ch
 			}
 		}()
 	}
-	pr := chainPrincipalFromRequest(r, h.Config)
 	env := chainEnv(h, pr, r.Header, types.AttachmentModeStatefulSSE, "sse", false, func(event types.ChainServerEvent) error {
 		return sw.Send(event.ChainServerEventType(), event)
 	})
@@ -354,15 +426,15 @@ func (h ChainsHandler) readRunPayload(w http.ResponseWriter, r *http.Request) (*
 	return types.UnmarshalChainRunPayloadStrict(body)
 }
 
-func (h ChainsHandler) validateRunStart(chainID string, payload *types.RunStartPayload) error {
+func (h ChainsHandler) validateRunStartAuthorized(ctx context.Context, pr chainrt.Principal, chainID string, payload *types.RunStartPayload) error {
 	if payload == nil {
 		return core.NewInvalidRequestError("payload must not be nil")
 	}
-	record, err := h.Chains.GetChain(context.Background(), chainID)
+	record, err := h.Chains.GetChainAuthorized(ctx, pr, chainID)
 	if err != nil {
 		return err
 	}
-	contextResp, err := h.Chains.GetChainContext(context.Background(), chainID)
+	contextResp, err := h.Chains.GetChainContextAuthorized(ctx, pr, chainID)
 	if err != nil {
 		return err
 	}
@@ -417,10 +489,30 @@ func (h ChainsHandler) writeChainError(w http.ResponseWriter, reqID string, err 
 }
 
 type SessionsHandler struct {
+	Config config.Config
 	Chains *chainrt.Manager
 }
 
 func (h SessionsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeCoreErrorJSON(w, requestID(r), &core.Error{Type: core.ErrInvalidRequest, Message: "method not allowed", Code: "method_not_allowed", RequestID: requestID(r)}, http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Path == "/v1/sessions" {
+		pr := chainPrincipalFromRequest(r, h.Config)
+		sessions, err := h.Chains.ListSessions(r.Context(), pr)
+		if err != nil {
+			if canonical, ok := err.(*types.CanonicalError); ok {
+				writeCanonicalErrorJSON(w, canonical)
+				return
+			}
+			coreErr, status := coreErrorFrom(err, requestID(r))
+			writeCoreErrorJSON(w, requestID(r), coreErr, status)
+			return
+		}
+		writeJSON(w, &types.SessionList{Items: sessions})
+		return
+	}
 	if !strings.HasPrefix(r.URL.Path, "/v1/sessions/") {
 		NotFoundHandler{}.ServeHTTP(w, r)
 		return
@@ -436,15 +528,16 @@ func (h SessionsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		NotFoundHandler{}.ServeHTTP(w, r)
 		return
 	}
-	if r.Method != http.MethodGet {
-		writeCoreErrorJSON(w, requestID(r), &core.Error{Type: core.ErrInvalidRequest, Message: "method not allowed", Code: "method_not_allowed", RequestID: requestID(r)}, http.StatusMethodNotAllowed)
-		return
-	}
+	pr := chainPrincipalFromRequest(r, h.Config)
 	if len(parts) == 1 {
-		session, err := h.Chains.GetSession(r.Context(), sessionID)
+		session, err := h.Chains.GetSessionAuthorized(r.Context(), pr, sessionID)
 		if err != nil {
 			if errors.Is(err, chainrt.ErrNotFound) {
 				writeCoreErrorJSON(w, requestID(r), &core.Error{Type: core.ErrNotFound, Message: "resource not found", RequestID: requestID(r)}, http.StatusNotFound)
+				return
+			}
+			if canonical, ok := err.(*types.CanonicalError); ok {
+				writeCanonicalErrorJSON(w, canonical)
 				return
 			}
 			coreErr, status := coreErrorFrom(err, requestID(r))
@@ -455,10 +548,14 @@ func (h SessionsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "chains" {
-		chains, err := h.Chains.ListSessionChains(r.Context(), sessionID)
+		chains, err := h.Chains.ListSessionChainsAuthorized(r.Context(), pr, sessionID)
 		if err != nil {
 			if errors.Is(err, chainrt.ErrNotFound) {
 				writeCoreErrorJSON(w, requestID(r), &core.Error{Type: core.ErrNotFound, Message: "resource not found", RequestID: requestID(r)}, http.StatusNotFound)
+				return
+			}
+			if canonical, ok := err.(*types.CanonicalError); ok {
+				writeCanonicalErrorJSON(w, canonical)
 				return
 			}
 			coreErr, status := coreErrorFrom(err, requestID(r))
@@ -472,6 +569,7 @@ func (h SessionsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type ChainRunsReadHandler struct {
+	Config config.Config
 	Chains *chainrt.Manager
 }
 
@@ -480,13 +578,26 @@ func (h ChainRunsReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		NotFoundHandler{}.ServeHTTP(w, r)
 		return
 	}
-	if r.Method != http.MethodGet {
-		writeCoreErrorJSON(w, requestID(r), &core.Error{Type: core.ErrInvalidRequest, Message: "method not allowed", Code: "method_not_allowed", RequestID: requestID(r)}, http.StatusMethodNotAllowed)
-		return
-	}
 	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/runs/"), "/")
 	if path == "" {
 		NotFoundHandler{}.ServeHTTP(w, r)
+		return
+	}
+	if strings.HasSuffix(path, ":regenerate") {
+		runID := strings.TrimSpace(strings.TrimSuffix(path, ":regenerate"))
+		if runID == "" {
+			NotFoundHandler{}.ServeHTTP(w, r)
+			return
+		}
+		if r.Method != http.MethodPost {
+			writeCoreErrorJSON(w, requestID(r), &core.Error{Type: core.ErrInvalidRequest, Message: "method not allowed", Code: "method_not_allowed", RequestID: requestID(r)}, http.StatusMethodNotAllowed)
+			return
+		}
+		h.regenerateRun(w, r, runID)
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeCoreErrorJSON(w, requestID(r), &core.Error{Type: core.ErrInvalidRequest, Message: "method not allowed", Code: "method_not_allowed", RequestID: requestID(r)}, http.StatusMethodNotAllowed)
 		return
 	}
 	parts := strings.Split(path, "/")
@@ -495,17 +606,18 @@ func (h ChainRunsReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		NotFoundHandler{}.ServeHTTP(w, r)
 		return
 	}
+	pr := chainPrincipalFromRequest(r, h.Config)
 	var (
 		value any
 		err   error
 	)
 	switch {
 	case len(parts) == 1:
-		value, err = h.Chains.GetRun(r.Context(), runID)
+		value, err = h.Chains.GetRunAuthorized(r.Context(), pr, runID)
 	case len(parts) == 2 && parts[1] == "timeline":
-		value, err = h.Chains.GetRunTimeline(r.Context(), runID)
+		value, err = h.Chains.GetRunTimelineAuthorized(r.Context(), pr, runID)
 	case len(parts) == 2 && parts[1] == "effective-request":
-		value, err = h.Chains.GetEffectiveRequest(r.Context(), runID)
+		value, err = h.Chains.GetEffectiveRequestAuthorized(r.Context(), pr, runID)
 	default:
 		NotFoundHandler{}.ServeHTTP(w, r)
 		return
@@ -515,11 +627,70 @@ func (h ChainRunsReadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			writeCoreErrorJSON(w, requestID(r), &core.Error{Type: core.ErrNotFound, Message: "resource not found", RequestID: requestID(r)}, http.StatusNotFound)
 			return
 		}
+		if canonical, ok := err.(*types.CanonicalError); ok {
+			writeCanonicalErrorJSON(w, canonical)
+			return
+		}
 		coreErr, status := coreErrorFrom(err, requestID(r))
 		writeCoreErrorJSON(w, requestID(r), coreErr, status)
 		return
 	}
 	writeJSON(w, value)
+}
+
+func (h ChainRunsReadHandler) regenerateRun(w http.ResponseWriter, r *http.Request, runID string) {
+	if h.Chains == nil {
+		writeCoreErrorJSON(w, requestID(r), core.NewInvalidRequestError("chain runtime is not configured"), http.StatusServiceUnavailable)
+		return
+	}
+	idempotencyKey := strings.TrimSpace(r.Header.Get(idempotencyKeyHeader))
+	if idempotencyKey == "" {
+		writeCanonicalErrorJSON(w, types.NewCanonicalError(types.ErrorCodeProtocolUnknownFrame, "Idempotency-Key header is required").WithRun(runID))
+		return
+	}
+	body, ok := readBoundedBody(w, r, 1<<20)
+	if !ok {
+		return
+	}
+	var payload types.RunRegenerateRequest
+	if err := decodeStrictJSON(body, &payload); err != nil {
+		if canonical, ok := err.(*types.CanonicalError); ok {
+			writeCanonicalErrorJSON(w, canonical.WithRun(runID))
+			return
+		}
+		coreErr, status := coreErrorFrom(err, requestID(r))
+		writeCoreErrorJSON(w, requestID(r), coreErr, status)
+		return
+	}
+	pr := chainPrincipalFromRequest(r, h.Config)
+	preview, err := h.Chains.PreviewRegenerateRun(r.Context(), pr, runID, payload)
+	if err != nil {
+		if canonical, ok := err.(*types.CanonicalError); ok {
+			writeCanonicalErrorJSON(w, canonical.WithRun(runID))
+			return
+		}
+		coreErr, status := coreErrorFrom(err, requestID(r))
+		writeCoreErrorJSON(w, requestID(r), coreErr, status)
+		return
+	}
+	history := append(cloneMessages(preview.History), cloneMessages(preview.Input)...)
+	chainsHandler := ChainsHandler{Config: h.Config}
+	if err := chainsHandler.validateChainMessageRequest(preview.Defaults, history); err != nil {
+		coreErr, status := coreErrorFrom(err, requestID(r))
+		writeCoreErrorJSON(w, requestID(r), coreErr, status)
+		return
+	}
+	resp, err := h.Chains.RegenerateRun(withHandlerTimeout(r.Context(), h.Config.HandlerTimeout), pr, runID, payload, idempotencyKey)
+	if err != nil {
+		if canonical, ok := err.(*types.CanonicalError); ok {
+			writeCanonicalErrorJSON(w, canonical)
+			return
+		}
+		coreErr, status := coreErrorFrom(err, requestID(r))
+		writeCoreErrorJSON(w, requestID(r), coreErr, status)
+		return
+	}
+	writeJSON(w, resp)
 }
 
 func requestID(r *http.Request) string {
@@ -549,6 +720,22 @@ func withHandlerTimeout(ctx context.Context, timeout time.Duration) context.Cont
 func writeJSON(w http.ResponseWriter, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func decodeStrictJSON(body []byte, dst any) error {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return core.NewInvalidRequestError("request body is invalid JSON")
+	}
+	if dec.More() {
+		return core.NewInvalidRequestError("request body must contain a single JSON object")
+	}
+	return nil
 }
 
 func messageRequestForValidation(defaults types.ChainDefaults, messages []types.Message) *types.MessageRequest {

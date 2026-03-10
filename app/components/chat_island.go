@@ -21,6 +21,7 @@ type chatIslandClientMessage struct {
 	Message       string            `json:"message,omitempty"`
 	Model         string            `json:"model,omitempty"`
 	KeySource     string            `json:"keySource,omitempty"`
+	Transport     string            `json:"transport,omitempty"`
 	AttachmentIDs []string          `json:"attachmentIds,omitempty"`
 	Regenerate    bool              `json:"regenerate,omitempty"`
 	EditMessageID string            `json:"editMessageId,omitempty"`
@@ -54,6 +55,7 @@ type chatSubmitCommand struct {
 	Message       string
 	Model         string
 	KeySource     services.KeySource
+	Transport     string
 	AttachmentIDs []string
 	Regenerate    bool
 	EditMessageID string
@@ -64,7 +66,7 @@ type chatServerMessage struct {
 	Type       string                 `json:"type"`
 	RequestID  string                 `json:"requestId,omitempty"`
 	Error      string                 `json:"error,omitempty"`
-	Intent     *services.UploadIntent `json:"intent,omitempty"`
+	Intent     any                    `json:"intent,omitempty"`
 	Attachment *chatAttachmentPayload `json:"attachment,omitempty"`
 	Delta      string                 `json:"delta,omitempty"`
 	Tool       any                    `json:"tool,omitempty"`
